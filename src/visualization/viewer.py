@@ -100,6 +100,7 @@ class TraversabilityViewer:
         self._display_mode = 0  # index into DISPLAY_MODES
         self._n_accum = 1       # number of scans to accumulate (window count)
         self._accum_step = 1    # stride between accumulated scans
+        self._forward_labeling = labeler.use_forward_labeling
 
         # Persistent traversable-point trail (world frame, Nx3)
         self._trail_active = False
@@ -121,6 +122,7 @@ class TraversabilityViewer:
         self._cb_traj: Optional[gui.Checkbox] = None
         self._cb_robot: Optional[gui.Checkbox] = None
         self._cb_trail: Optional[gui.Checkbox] = None
+        self._cb_forward: Optional[gui.Checkbox] = None
         self._idx_slider: Optional[gui.Slider] = None
         self._num_edit: Optional[gui.NumberEdit] = None
         self._accum_slider: Optional[gui.Slider] = None
@@ -262,6 +264,11 @@ class TraversabilityViewer:
         self._cb_robot.checked = self._show_robot
         self._cb_robot.set_on_checked(lambda v: self._set_overlay("robot", v))
         panel.add_child(self._cb_robot)
+
+        self._cb_forward = gui.Checkbox("Forward labeling  [V]")
+        self._cb_forward.checked = self._forward_labeling
+        self._cb_forward.set_on_checked(self._on_forward_toggled)
+        panel.add_child(self._cb_forward)
         panel.add_child(gui.Label(""))
 
         # Accumulated scans
@@ -372,6 +379,10 @@ class TraversabilityViewer:
             self._cb_trail.checked = self._trail_active
             self._update_trail_label()
             return H
+        if k in (ord("v"), ord("V")):
+            self._on_forward_toggled(not self._forward_labeling)
+            self._cb_forward.checked = self._forward_labeling
+            return H
         return gui.Widget.EventCallbackResult.IGNORED
 
     def _on_next(self) -> None:
@@ -412,6 +423,13 @@ class TraversabilityViewer:
         else:
             span = (n - 1) * s
             self._lbl_accum.text = f"N = {n}  step = {s}  (~{span} scans back)"
+
+    def _on_forward_toggled(self, active: bool) -> None:
+        self._forward_labeling = active
+        self.labeler.use_forward_labeling = active
+        # Invalidate label cache so next refresh recomputes with new setting.
+        self._label_cache.clear()
+        self._refresh()
 
     def _on_trail_toggled(self, active: bool) -> None:
         self._trail_active = active

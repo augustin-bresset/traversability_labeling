@@ -110,6 +110,76 @@ class TestLabelScan:
         assert labels[0] == 0, "Last scan has no future poses — nothing traversable"
 
 
+class TestForwardLabeling:
+    """use_forward_labeling=True labels height-filtered points in the forward corridor."""
+
+    def setup_method(self):
+        self.labeler = TraversabilityLabeler(
+            robot_shape="square",
+            robot_size=1.0,
+            height_min=-0.5,
+            height_max=0.3,
+            trajectory_window=100,
+            use_forward_labeling=True,
+            forward_dist=5.0,
+        )
+
+    def test_forward_point_labeled(self):
+        # Robot at idx=5 (world [1.5, 0]), next pose at [1.8, 0].
+        # Forward direction in scan-local ≈ [+x].
+        # A point at [2.0, 0, 0] in scan-local is 2 m ahead, within 5 m corridor,
+        # within 0.5 m lateral half-size → must be labeled.
+        positions = [(0.3 * i, 0.0) for i in range(20)]
+        poses = _make_poses(positions)
+
+        xyz = np.array([[2.0, 0.0, 0.0]], dtype=np.float32)
+        labels = self.labeler.label_scan(xyz, poses, current_idx=5)
+        assert labels[0] == 1, "Point ahead in corridor should be traversable"
+
+    def test_forward_beyond_dist_not_labeled(self):
+        # 6 m ahead > forward_dist=5 m → not labeled by forward pass.
+        # Also beyond trajectory window reach → not labeled by poses either.
+        positions = [(0.3 * i, 0.0) for i in range(20)]
+        poses = _make_poses(positions)
+
+        xyz = np.array([[6.0, 0.0, 0.0]], dtype=np.float32)
+        labels = self.labeler.label_scan(xyz, poses, current_idx=5)
+        assert labels[0] == 0, "Point beyond forward_dist should not be labeled"
+
+    def test_forward_lateral_outside_footprint_not_labeled(self):
+        # 2 m ahead but 1 m to the side (> 0.5 m half-size) → outside corridor.
+        positions = [(0.3 * i, 0.0) for i in range(20)]
+        poses = _make_poses(positions)
+
+        xyz = np.array([[2.0, 1.0, 0.0]], dtype=np.float32)
+        labels = self.labeler.label_scan(xyz, poses, current_idx=5)
+        assert labels[0] == 0, "Point outside lateral footprint should not be labeled"
+
+    def test_behind_point_not_labeled_by_forward(self):
+        # Behind the robot → negative forward projection → not labeled by forward pass.
+        # (Still won't be labeled by future poses either since robot moves away.)
+        positions = [(0.3 * i, 0.0) for i in range(20)]
+        poses = _make_poses(positions)
+
+        xyz = np.array([[-2.0, 0.0, 0.0]], dtype=np.float32)
+        labels = self.labeler.label_scan(xyz, poses, current_idx=5)
+        assert labels[0] == 0, "Point behind robot should not be labeled by forward pass"
+
+    def test_disabled_by_default(self):
+        # Default labeler has use_forward_labeling=False: far-ahead point not labeled.
+        labeler = TraversabilityLabeler(
+            robot_shape="square", robot_size=1.0,
+            height_min=-0.5, height_max=0.3, trajectory_window=2,
+        )
+        positions = [(0.3 * i, 0.0) for i in range(20)]
+        poses = _make_poses(positions)
+
+        # Point 4 m ahead, beyond trajectory window reach (window=2 → max 0.9 m in scan-local)
+        xyz = np.array([[4.0, 0.0, 0.0]], dtype=np.float32)
+        labels = labeler.label_scan(xyz, poses, current_idx=5)
+        assert labels[0] == 0, "Forward labeling disabled: far-ahead point should not be labeled"
+
+
 class TestLabelAccumulated:
     """label_accumulated: per-point future-only constraint via scan_origins."""
 

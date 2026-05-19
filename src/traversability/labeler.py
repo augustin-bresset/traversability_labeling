@@ -16,6 +16,13 @@ class TraversabilityLabeler:
     by poses AFTER k (i.e. traj_lo >= k+1).  Using past poses would cause dynamic
     objects (people, vehicles) that happen to be at a former robot position to be
     incorrectly labeled as traversable.
+
+    Optional forward labeling (use_forward_labeling=True):
+    At high frame rates the robot barely moves between scans, so height-filtered
+    points that lie inside the footprint-width corridor ahead of the robot are
+    very likely traversable even before a future pose confirms it.  This fills
+    blind-spot gaps in the look-ahead direction without reintroducing the
+    people-behind false-positive problem (because "ahead" ≠ "behind").
     """
 
     def __init__(
@@ -25,6 +32,8 @@ class TraversabilityLabeler:
         height_min: float = -0.5,
         height_max: float = 0.3,
         trajectory_window: int = 100,
+        use_forward_labeling: bool = False,
+        forward_dist: float = 5.0,
     ):
         if robot_shape not in ("square", "round"):
             raise ValueError(f"Unknown robot shape '{robot_shape}'. Use 'square' or 'round'.")
@@ -33,10 +42,69 @@ class TraversabilityLabeler:
         self.height_min = height_min
         self.height_max = height_max
         self.trajectory_window = trajectory_window
+        self.use_forward_labeling = use_forward_labeling
+        self.forward_dist = forward_dist
 
     # ------------------------------------------------------------------
     # Internal
     # ------------------------------------------------------------------
+
+    def _forward_dir(
+        self,
+        poses: List[np.ndarray],
+        current_idx: int,
+    ) -> Optional[np.ndarray]:
+        """
+        Unit forward-direction vector (2-D, x-y) in the current scan's local frame.
+
+        Uses the next pose when available (true look-ahead), falls back to the
+        previous pose (reversed) so the first scan is also handled.
+        Returns None if no direction can be determined.
+        """
+        T_scan_world = np.linalg.inv(poses[current_idx])
+        if current_idx + 1 < len(poses):
+            other = (T_scan_world @ poses[current_idx + 1])[:3, 3]
+        elif current_idx > 0:
+            other = -(T_scan_world @ poses[current_idx - 1])[:3, 3]
+        else:
+            return None
+        norm = np.linalg.norm(other[:2])
+        if norm < 1e-6:
+            return None
+        return other[:2] / norm
+
+    def _label_forward(
+        self,
+        xyz: np.ndarray,
+        labels: np.ndarray,
+        poses: List[np.ndarray],
+        current_idx: int,
+    ) -> None:
+        """
+        In-place: label height-filtered points in the forward corridor as traversable.
+
+        The corridor is `forward_dist` metres deep and `robot_size` wide (same
+        lateral half-size as the footprint), centred on the direction of travel.
+        Applied on top of trajectory-based labels — never removes a label.
+        """
+        fwd = self._forward_dir(poses, current_idx)
+        if fwd is None:
+            return
+
+        height_mask = (xyz[:, 2] >= self.height_min) & (xyz[:, 2] <= self.height_max)
+        candidates = np.where(height_mask)[0]
+        if len(candidates) == 0:
+            return
+
+        xy = xyz[candidates, :2]
+        # Signed projection onto forward axis
+        fwd_proj = xy @ fwd
+        # Lateral distance (perpendicular component)
+        lateral = xy - np.outer(fwd_proj, fwd)
+        lat_dist = np.linalg.norm(lateral, axis=1)
+
+        in_corridor = (fwd_proj > 0) & (fwd_proj <= self.forward_dist) & (lat_dist < self.half_size)
+        labels[candidates[in_corridor]] = 1
 
     def _in_footprint(self, dx: np.ndarray, dy: np.ndarray) -> np.ndarray:
         if self.robot_shape == "round":
@@ -103,7 +171,10 @@ class TraversabilityLabeler:
         """
         lo = traj_lo if traj_lo is not None else current_idx + 1
         hi = traj_hi if traj_hi is not None else min(len(poses), current_idx + self.trajectory_window + 1)
-        return self._label_range(xyz, poses, current_idx, lo, hi)
+        labels = self._label_range(xyz, poses, current_idx, lo, hi)
+        if self.use_forward_labeling:
+            self._label_forward(xyz, labels, poses, current_idx)
+        return labels
 
     def label_accumulated(
         self,
@@ -144,5 +215,10 @@ class TraversabilityLabeler:
             labels[mask] = self._label_range(
                 xyz_acc[mask], poses, current_idx, lo, hi
             )
+
+        # Forward labeling acts on the full accumulated cloud (all points are in
+        # the current scan's local frame, so the corridor direction is consistent).
+        if self.use_forward_labeling:
+            self._label_forward(xyz_acc, labels, poses, current_idx)
 
         return labels

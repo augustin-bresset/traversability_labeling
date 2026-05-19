@@ -64,7 +64,9 @@ Examples:
         cfg = yaml.safe_load(f)
 
     max_rad      = _get(cfg, "data",    "max_rad",          default=50.0)
-    icp_required = _get(cfg, "setting", "icp_required",     default=False)
+    icp_required     = _get(cfg, "setting", "icp_required",     default=False)
+    forward_labeling = _get(cfg, "setting", "forward_labeling", default=False)
+    forward_dist     = _get(cfg, "setting", "forward_dist",     default=5.0)
     robot_shape  = _get(cfg, "robot",   "shape",            default="square")
     robot_size   = _get(cfg, "robot",   "size",             default=1.0)
     height_min   = _get(cfg, "robot",   "height_min",       default=-0.5)
@@ -106,6 +108,8 @@ Examples:
         height_min=height_min,
         height_max=height_max,
         trajectory_window=traj_window,
+        use_forward_labeling=forward_labeling,
+        forward_dist=forward_dist,
     )
 
     label_dir = Path(args.labels) if args.labels else None

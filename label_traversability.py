@@ -162,7 +162,9 @@ def main() -> None:
 
     root_dir     = _get(cfg, "data",    "source",       default="data/rellis/")
     max_rad      = _get(cfg, "data",    "max_rad",       default=50.0)
-    icp_required = _get(cfg, "setting", "icp_required",  default=False)
+    icp_required      = _get(cfg, "setting", "icp_required",    default=False)
+    forward_labeling  = _get(cfg, "setting", "forward_labeling", default=False)
+    forward_dist      = _get(cfg, "setting", "forward_dist",     default=5.0)
 
     robot_shape  = _get(cfg, "robot", "shape",           default="square")
     robot_size   = _get(cfg, "robot", "size",            default=1.0)
@@ -178,12 +180,15 @@ def main() -> None:
         height_min=height_min,
         height_max=height_max,
         trajectory_window=traj_window,
+        use_forward_labeling=forward_labeling,
+        forward_dist=forward_dist,
     )
     output_dir = Path(args.output)
 
     print(f"Dataset : {root_dir}  split={args.split}  ({len(dataset)} sequence(s))")
     print(f"Robot   : shape={robot_shape}  size={robot_size} m")
     print(f"ICP     : {icp_required}")
+    print(f"Forward : {forward_labeling}  dist={forward_dist} m")
     print(f"Output  : {output_dir}\n")
 
     for seq in dataset:
