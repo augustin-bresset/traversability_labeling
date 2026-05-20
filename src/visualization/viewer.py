@@ -95,8 +95,13 @@ class TraversabilityViewer:
         self._label_cache: dict[int, np.ndarray] = {}
         self._scan_cache:  dict[int, Tuple[np.ndarray, np.ndarray]] = {}
 
-        self._show_trajectory = True
+        self._show_trav = True
+        self._show_ground = True
+        self._show_other = True
+        self._show_traj_past = True
+        self._show_traj_future = True
         self._show_robot = True
+        self._show_trail_pts = True
         self._display_mode = 0  # index into DISPLAY_MODES
         self._n_accum = 1       # number of scans to accumulate (window count)
         self._accum_step = 1    # stride between accumulated scans
@@ -120,8 +125,13 @@ class TraversabilityViewer:
         self._lbl_mode: Optional[gui.Label] = None
         self._lbl_accum: Optional[gui.Label] = None
         self._lbl_trail: Optional[gui.Label] = None
-        self._cb_traj: Optional[gui.Checkbox] = None
-        self._cb_robot: Optional[gui.Checkbox] = None
+        self._cb_trav:        Optional[gui.Checkbox] = None
+        self._cb_ground:      Optional[gui.Checkbox] = None
+        self._cb_other:       Optional[gui.Checkbox] = None
+        self._cb_traj_past:   Optional[gui.Checkbox] = None
+        self._cb_traj_future: Optional[gui.Checkbox] = None
+        self._cb_robot:       Optional[gui.Checkbox] = None
+        self._cb_trail_pts:   Optional[gui.Checkbox] = None
         self._cb_trail: Optional[gui.Checkbox] = None
         self._cb_fwd_accum: Optional[gui.Checkbox] = None
         self._cb_fwd_only:  Optional[gui.Checkbox] = None
@@ -241,37 +251,35 @@ class TraversabilityViewer:
         panel.add_child(b_mode)
         panel.add_child(gui.Label(""))
 
-        # Legend
+        # Legend — each entry is a visibility checkbox
         panel.add_child(self._sec("Legend", em))
-        for label_text, rgb in [
-            ("Traversable",         self.C_TRAV),
-            ("Ground (unlabelled)", self.C_GROUND),
-            ("Other points",        self.C_OTHER),
-            ("Trajectory - past",   self.C_TRAJ_PAST),
-            ("Trajectory - future", self.C_TRAJ_FUTURE),
-            ("Robot footprint",     self.C_ROBOT),
-            ("Traversable trail",   self.C_TRAIL),
-        ]:
+        _sel_row = gui.Horiz(int(0.3 * em))
+        b_all  = gui.Button("Show all");  b_all.set_on_clicked(lambda: self._set_all_legend(True))
+        b_none = gui.Button("Hide all"); b_none.set_on_clicked(lambda: self._set_all_legend(False))
+        _sel_row.add_child(b_all); _sel_row.add_child(b_none)
+        panel.add_child(_sel_row)
+        _legend_items = [
+            ("Traversable",         self.C_TRAV,        "_show_trav",        "_cb_trav"),
+            ("Ground (unlabelled)", self.C_GROUND,       "_show_ground",      "_cb_ground"),
+            ("Other points",        self.C_OTHER,        "_show_other",       "_cb_other"),
+            ("Trajectory - past",   self.C_TRAJ_PAST,    "_show_traj_past",   "_cb_traj_past"),
+            ("Trajectory - future", self.C_TRAJ_FUTURE,  "_show_traj_future", "_cb_traj_future"),
+            ("Robot footprint",     self.C_ROBOT,        "_show_robot",       "_cb_robot"),
+            ("Traversable trail",   self.C_TRAIL,        "_show_trail_pts",   "_cb_trail_pts"),
+        ]
+        for label_text, rgb, state_attr, cb_attr in _legend_items:
             row = gui.Horiz(int(0.3 * em))
             row.add_child(gui.ImageWidget(_color_tile(rgb)))
-            lbl = gui.Label(label_text)
-            lbl.text_color = gui.Color(0.75, 0.75, 0.75)
-            row.add_child(lbl)
+            cb = gui.Checkbox(label_text)
+            cb.checked = getattr(self, state_attr)
+            cb.set_on_checked(lambda v, a=state_attr: self._on_legend_toggle(a, v))
+            setattr(self, cb_attr, cb)
+            row.add_child(cb)
             panel.add_child(row)
         panel.add_child(gui.Label(""))
 
         # Overlays
         panel.add_child(self._sec("Overlays", em))
-        self._cb_traj = gui.Checkbox("Trajectory  [J]")
-        self._cb_traj.checked = self._show_trajectory
-        self._cb_traj.set_on_checked(lambda v: self._set_overlay("traj", v))
-        panel.add_child(self._cb_traj)
-
-        self._cb_robot = gui.Checkbox("Robot footprint  [K]")
-        self._cb_robot.checked = self._show_robot
-        self._cb_robot.set_on_checked(lambda v: self._set_overlay("robot", v))
-        panel.add_child(self._cb_robot)
-
         self._cb_fwd_accum = gui.Checkbox("Forward accum  [V]")
         self._cb_fwd_accum.checked = self._forward_accum
         self._cb_fwd_accum.set_on_checked(self._on_fwd_accum_toggled)
@@ -378,13 +386,16 @@ class TraversabilityViewer:
         if k in (ord("e"), ord("E")): self._look_lidar();                           return H
         if k in (ord("t"), ord("T")): self._on_cycle_mode();                        return H
         if k in (ord("j"), ord("J")):
-            self._show_trajectory = not self._show_trajectory
-            self._cb_traj.checked = self._show_trajectory
+            new_val = not (self._show_traj_past and self._show_traj_future)
+            self._show_traj_past = new_val
+            self._show_traj_future = new_val
+            if self._cb_traj_past:   self._cb_traj_past.checked   = new_val
+            if self._cb_traj_future: self._cb_traj_future.checked = new_val
             self._refresh_overlays()
             return H
         if k in (ord("k"), ord("K")):
             self._show_robot = not self._show_robot
-            self._cb_robot.checked = self._show_robot
+            if self._cb_robot: self._cb_robot.checked = self._show_robot
             self._refresh_overlays()
             return H
         if k in (ord("m"), ord("M")):
@@ -470,17 +481,35 @@ class TraversabilityViewer:
     def _on_cycle_mode(self) -> None:
         self._display_mode = (self._display_mode + 1) % len(DISPLAY_MODES)
         self._lbl_mode.text = DISPLAY_MODES[self._display_mode]
-        idx = self.current_idx
-        xyz, intensity = self._get_scan(idx)
-        labels = self._get_labels(idx, xyz)
-        self._update_cloud(xyz, intensity, labels)
+        self._refresh()
 
-    def _set_overlay(self, which: str, value: bool) -> None:
-        if which == "traj":
-            self._show_trajectory = value
-        else:
-            self._show_robot = value
-        self._refresh_overlays()
+    def _on_legend_toggle(self, attr: str, value: bool) -> None:
+        setattr(self, attr, value)
+        if attr in ("_show_trav", "_show_ground", "_show_other"):
+            self._refresh()
+        elif attr in ("_show_traj_past", "_show_traj_future", "_show_robot"):
+            self._refresh_overlays()
+        elif attr == "_show_trail_pts":
+            self._update_trav_trail(self.current_idx)
+
+    _LEGEND_ATTRS = [
+        ("_show_trav",        "_cb_trav"),
+        ("_show_ground",      "_cb_ground"),
+        ("_show_other",       "_cb_other"),
+        ("_show_traj_past",   "_cb_traj_past"),
+        ("_show_traj_future", "_cb_traj_future"),
+        ("_show_robot",       "_cb_robot"),
+        ("_show_trail_pts",   "_cb_trail_pts"),
+    ]
+
+    def _set_all_legend(self, value: bool) -> None:
+        for state_attr, cb_attr in self._LEGEND_ATTRS:
+            setattr(self, state_attr, value)
+            cb = getattr(self, cb_attr)
+            if cb is not None:
+                cb.checked = value
+        self._refresh()
+        self._update_trav_trail(self.current_idx)
 
     # ------------------------------------------------------------------
     # Data access (lazy cache)
@@ -562,12 +591,30 @@ class TraversabilityViewer:
             f"(current scan, {len(xyz):,} pts)"
         )
 
-        # Forward-only preview: keep only points in the forward half-space.
+        # Forward-only preview: apply only to current scan (first len(xyz) points).
+        # Accumulated points from past scans are kept as-is.
         if self._fwd_only and self.poses is not None:
-            fmask = self.labeler.forward_mask(xyz_disp, self.poses, idx)
-            xyz_disp       = xyz_disp[fmask]
-            intensity_disp = intensity_disp[fmask]
-            labels_disp    = labels_disp[fmask]
+            n_curr = len(xyz)
+            fmask_curr = self.labeler.forward_mask(xyz_disp[:n_curr], self.poses, idx)
+            full_fmask = np.ones(len(xyz_disp), dtype=bool)
+            full_fmask[:n_curr] = fmask_curr
+            xyz_disp       = xyz_disp[full_fmask]
+            intensity_disp = intensity_disp[full_fmask]
+            labels_disp    = labels_disp[full_fmask]
+
+        # Category visibility filter (always applied, all colour modes)
+        if not (self._show_trav and self._show_ground and self._show_other):
+            h_mask = (
+                (xyz_disp[:, 2] >= self.labeler.height_min)
+                & (xyz_disp[:, 2] <= self.labeler.height_max)
+            )
+            vis = np.zeros(len(xyz_disp), dtype=bool)
+            if self._show_trav:   vis |= (labels_disp == 1)
+            if self._show_ground: vis |= (h_mask & (labels_disp != 1))
+            if self._show_other:  vis |= ~h_mask
+            xyz_disp       = xyz_disp[vis]
+            intensity_disp = intensity_disp[vis]
+            labels_disp    = labels_disp[vis]
 
         self._update_cloud(xyz_disp, intensity_disp, labels_disp)
         self._update_trav_trail(idx)
@@ -679,6 +726,8 @@ class TraversabilityViewer:
         scene = self._scene.scene
         scene.remove_geometry("trav_trail")
 
+        if not self._show_trail_pts:
+            return
         if (
             self._trav_trail_world is None
             or len(self._trav_trail_world) == 0
@@ -768,7 +817,9 @@ class TraversabilityViewer:
         scene.remove_geometry("traj_past")
         scene.remove_geometry("traj_future")
 
-        if not self._show_trajectory or self.poses is None:
+        if self.poses is None:
+            return
+        if not self._show_traj_past and not self._show_traj_future:
             return
 
         idx          = self.current_idx
@@ -796,13 +847,15 @@ class TraversabilityViewer:
             ls.lines  = o3d.utility.Vector2iVector(edges)
             return ls
 
-        ls_past   = _build_ls(list(range(lo, idx + 1)))
-        ls_future = _build_ls(list(range(idx, hi)))
+        if self._show_traj_past:
+            ls_past = _build_ls(list(range(lo, idx + 1)))
+            if ls_past is not None:
+                scene.add_geometry("traj_past", ls_past, self._line_material(self.C_TRAJ_PAST))
 
-        if ls_past   is not None:
-            scene.add_geometry("traj_past",   ls_past,   self._line_material(self.C_TRAJ_PAST))
-        if ls_future is not None:
-            scene.add_geometry("traj_future", ls_future, self._line_material(self.C_TRAJ_FUTURE))
+        if self._show_traj_future:
+            ls_future = _build_ls(list(range(idx, hi)))
+            if ls_future is not None:
+                scene.add_geometry("traj_future", ls_future, self._line_material(self.C_TRAJ_FUTURE))
 
     # ------------------------------------------------------------------
     # Robot footprint overlay

@@ -4,11 +4,18 @@ Given the geometry of your robot, labels as traversable the points in the point 
 
 ## Quick start
 
-### 1. Install dependencies
+### 1. Set up the environment
+
+```bash
+conda env create -f environment.yml   # create from scratch (first time)
+conda activate trav_loss
+```
+
+Or, if the `trav_loss` environment already exists and you just want to sync dependencies:
 
 ```bash
 conda activate trav_loss
-pip install scipy open3d
+pip install numpy scipy open3d pyyaml matplotlib pytest
 ```
 
 ### 2. Configure
@@ -71,13 +78,20 @@ python -m src.visualization --seq data/rellis/00000 --config configs/example.yam
 | `->` / `L` | Next scan |
 | `<-` / `H` | Previous scan |
 | `T` | Cycle colour mode (Traversability / Intensity / Height) |
-| `J` | Toggle trajectory |
+| `J` | Toggle trajectory (past + future) |
 | `K` | Toggle robot footprint |
 | `M` | Toggle traversable-point trail recording |
+| `V` | Toggle forward-accumulation filter |
+| `N` | Toggle forward-mask preview (show only forward-seen points) |
 | `F` | Top-down view |
+| `E` | LiDAR first-person view (camera at sensor, looking forward) |
 | `R` | Reset camera |
 
+**Legend panel** - each legend entry has a checkbox to show/hide that category independently (traversable points, ground, other points, past/future trajectory, robot footprint, traversable trail).
+
 **Accumulate scans panel** - set *N* (how many past scans to stack) and *step* (every K-th scan).  With N=10 and step=5, the viewer stacks 10 scans spaced 5 apart, reaching 45 scans into the past without multiplying the point count.
+
+**Forward accumulation** - when enabled, only points that were *ahead* of the robot at the time of each past scan are included in the accumulated cloud, preventing people following the vehicle from appearing as traversable.
 
 **Traversable trail** - when recording is on, traversable points from each visited scan are accumulated in world coordinates (magenta). Useful to visualise the complete traversed path across the sequence. Capped at 500 k points; use *Clear* to reset.
 

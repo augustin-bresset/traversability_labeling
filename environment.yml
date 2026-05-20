@@ -1,0 +1,15 @@
+name: trav_loss
+channels:
+  - defaults
+  - conda-forge
+  - pytorch
+dependencies:
+  - python=3.11
+  - pip
+  - pip:
+    - numpy
+    - scipy
+    - open3d
+    - pyyaml
+    - matplotlib
+    - pytest
