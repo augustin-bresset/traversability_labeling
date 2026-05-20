@@ -11,6 +11,5 @@ data:
   max_rad: 50.0            # ignore points farther than this (metres)
 
 setting:
-  icp_required: False      # True → compute poses via ICP when poses.txt is absent
-  forward_labeling: True  # True → also label height-filtered points in the forward corridor
-  forward_dist: 5.0        # depth of the forward corridor in metres
+  icp_required: False      # True -> compute poses via ICP when poses.txt is absent
+  forward_accum: True      # True -> only include forward-seen points from past scans in the accumulation

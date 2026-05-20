@@ -74,7 +74,7 @@ def process_sequence(
     if seq.has_poses():
         poses = seq.poses
     elif icp_required:
-        print(f"    No poses.txt found — computing poses via ICP ...", flush=True)
+        print(f"    No poses.txt found - computing poses via ICP ...", flush=True)
         poses = compute_sequence_poses(scans_xyz)
     else:
         raise RuntimeError(
@@ -102,32 +102,33 @@ def process_sequence(
     for i, cloud_file in enumerate(seq.cloud_files):
         xyz_i, _ = scans_xyz[i], None  # already loaded
 
-        # Accumulate past scans into scan i's frame
+        # Accumulate past scans into scan i's frame.
+        # With forward_accum=True, only keep points that were ahead of the robot
+        # at the time each past scan was taken - this prevents people or objects
+        # behind the vehicle from entering the accumulated cloud.
         T_scan_world = np.linalg.inv(poses[i])
-        all_xyz = [scans_xyz[i]]
+        all_xyz      = [scans_xyz[i]]
+        all_origins  = [np.full(len(scans_xyz[i]), i, dtype=np.int32)]
 
         for k in range(max(0, i - accum_window), i):
             xyz_k = scans_xyz[k]
+
+            # Forward filter: drop points behind the robot at scan k.
+            if labeler.forward_accum:
+                fmask = labeler.forward_mask(xyz_k, poses, k)
+                xyz_k = xyz_k[fmask]
+            if len(xyz_k) == 0:
+                continue
+
             step  = max(1, len(xyz_k) // MAX_PTS_PER_PAST_SCAN)
             xyz_k = xyz_k[::step]
             T_scan_k = T_scan_world @ poses[k]
             R, t = T_scan_k[:3, :3], T_scan_k[:3, 3]
             all_xyz.append(((R @ xyz_k.T).T + t).astype(np.float32))
+            all_origins.append(np.full(len(xyz_k), k, dtype=np.int32))
 
-        xyz_acc = np.vstack(all_xyz)
-
-        # Build scan_origins: current scan = i, past scan k → k
-        scan_origins = np.concatenate([
-            np.full(len(scans_xyz[i]), i, dtype=np.int32),
-            *[
-                np.full(
-                    max(1, len(scans_xyz[k]) // MAX_PTS_PER_PAST_SCAN),
-                    k,
-                    dtype=np.int32,
-                )
-                for k in range(max(0, i - accum_window), i)
-            ],
-        ])
+        xyz_acc      = np.vstack(all_xyz)
+        scan_origins = np.concatenate(all_origins)
 
         # label_accumulated only uses poses AFTER each point's origin scan,
         # preventing dynamic objects at former robot positions being mislabeled.
@@ -141,7 +142,7 @@ def process_sequence(
         total_pts  += len(labels_i)
 
     pct = 100.0 * trav_count / max(total_pts, 1)
-    print(f"    Saved {n} label files → {seq_out}")
+    print(f"    Saved {n} label files -> {seq_out}")
     print(f"    Traversable: {trav_count}/{total_pts} pts ({pct:.1f} %)")
 
 
@@ -162,9 +163,8 @@ def main() -> None:
 
     root_dir     = _get(cfg, "data",    "source",       default="data/rellis/")
     max_rad      = _get(cfg, "data",    "max_rad",       default=50.0)
-    icp_required      = _get(cfg, "setting", "icp_required",    default=False)
-    forward_labeling  = _get(cfg, "setting", "forward_labeling", default=False)
-    forward_dist      = _get(cfg, "setting", "forward_dist",     default=5.0)
+    icp_required   = _get(cfg, "setting", "icp_required",  default=False)
+    forward_accum  = _get(cfg, "setting", "forward_accum", default=False)
 
     robot_shape  = _get(cfg, "robot", "shape",           default="square")
     robot_size   = _get(cfg, "robot", "size",            default=1.0)
@@ -180,15 +180,14 @@ def main() -> None:
         height_min=height_min,
         height_max=height_max,
         trajectory_window=traj_window,
-        use_forward_labeling=forward_labeling,
-        forward_dist=forward_dist,
+        forward_accum=forward_accum,
     )
     output_dir = Path(args.output)
 
     print(f"Dataset : {root_dir}  split={args.split}  ({len(dataset)} sequence(s))")
     print(f"Robot   : shape={robot_shape}  size={robot_size} m")
-    print(f"ICP     : {icp_required}")
-    print(f"Forward : {forward_labeling}  dist={forward_dist} m")
+    print(f"ICP           : {icp_required}")
+    print(f"Forward accum : {forward_accum}")
     print(f"Output  : {output_dir}\n")
 
     for seq in dataset:

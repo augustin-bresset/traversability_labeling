@@ -64,16 +64,15 @@ Examples:
         cfg = yaml.safe_load(f)
 
     max_rad      = _get(cfg, "data",    "max_rad",          default=50.0)
-    icp_required     = _get(cfg, "setting", "icp_required",     default=False)
-    forward_labeling = _get(cfg, "setting", "forward_labeling", default=False)
-    forward_dist     = _get(cfg, "setting", "forward_dist",     default=5.0)
+    icp_required  = _get(cfg, "setting", "icp_required",  default=False)
+    forward_accum = _get(cfg, "setting", "forward_accum", default=False)
     robot_shape  = _get(cfg, "robot",   "shape",            default="square")
     robot_size   = _get(cfg, "robot",   "size",             default=1.0)
     height_min   = _get(cfg, "robot",   "height_min",       default=-0.5)
     height_max   = _get(cfg, "robot",   "height_max",       default=0.3)
     traj_window  = _get(cfg, "robot",   "trajectory_window",default=100)
 
-    # Load sequence — try path as-is, then with Rellis-3D/ inserted
+    # Load sequence - try path as-is, then with Rellis-3D/ inserted
     seq_path = Path(args.seq)
     if not (seq_path / "os1_cloud_node_kitti_bin").exists():
         candidate = seq_path.parent / "Rellis-3D" / seq_path.name
@@ -89,9 +88,9 @@ Examples:
         poses = seq.poses
         print(f"  Poses loaded from poses.txt ({len(poses)} entries).")
     elif args.labels is not None:
-        print("  No poses.txt — will load labels from files.")
+        print("  No poses.txt - will load labels from files.")
     elif icp_required:
-        print("  No poses.txt — computing poses via ICP (this may take a moment) ...")
+        print("  No poses.txt - computing poses via ICP (this may take a moment) ...")
         scans_xyz = [seq.get_scan(i)[0] for i in range(len(seq))]
         poses = compute_sequence_poses(scans_xyz)
         print(f"  ICP done: {len(poses)} poses computed.")
@@ -108,8 +107,7 @@ Examples:
         height_min=height_min,
         height_max=height_max,
         trajectory_window=traj_window,
-        use_forward_labeling=forward_labeling,
-        forward_dist=forward_dist,
+        forward_accum=forward_accum,
     )
 
     label_dir = Path(args.labels) if args.labels else None

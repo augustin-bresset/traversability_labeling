@@ -6,8 +6,8 @@ Displays per scan:
   - Past/future trajectory in the scan's local frame
 
 Keyboard shortcuts:
-    → / L   next scan
-    ← / H   previous scan
+    -> / L   next scan
+    <- / H   previous scan
     R       reset camera
     F       top-down (bird's-eye) view
     T       cycle colour mode  (traversability / intensity / height)
@@ -100,7 +100,8 @@ class TraversabilityViewer:
         self._display_mode = 0  # index into DISPLAY_MODES
         self._n_accum = 1       # number of scans to accumulate (window count)
         self._accum_step = 1    # stride between accumulated scans
-        self._forward_labeling = labeler.use_forward_labeling
+        self._forward_accum = labeler.forward_accum
+        self._fwd_only = False
 
         # Persistent traversable-point trail (world frame, Nx3)
         self._trail_active = False
@@ -122,7 +123,8 @@ class TraversabilityViewer:
         self._cb_traj: Optional[gui.Checkbox] = None
         self._cb_robot: Optional[gui.Checkbox] = None
         self._cb_trail: Optional[gui.Checkbox] = None
-        self._cb_forward: Optional[gui.Checkbox] = None
+        self._cb_fwd_accum: Optional[gui.Checkbox] = None
+        self._cb_fwd_only:  Optional[gui.Checkbox] = None
         self._idx_slider: Optional[gui.Slider] = None
         self._num_edit: Optional[gui.NumberEdit] = None
         self._accum_slider: Optional[gui.Slider] = None
@@ -159,7 +161,7 @@ class TraversabilityViewer:
 
     def _build_window(self) -> None:
         app = gui.Application.instance
-        w = app.create_window(f"Traversability — {self.seq.name}", 1600, 950)
+        w = app.create_window(f"Traversability - {self.seq.name}", 1600, 950)
         self._window = w
         em = w.theme.font_size
 
@@ -169,7 +171,7 @@ class TraversabilityViewer:
         self._mat.point_size = POINT_SIZE
 
         # "unlitLine" is the correct Filament shader for LineSet geometries.
-        # "defaultUnlit" requires UV0 which LineSets don't have → crash.
+        # "defaultUnlit" requires UV0 which LineSets don't have -> crash.
         self._line_mat = rendering.MaterialRecord()
         self._line_mat.shader = "unlitLine"
         self._line_mat.line_width = 2.5
@@ -185,10 +187,10 @@ class TraversabilityViewer:
 
         # Navigation
         panel.add_child(self._sec("Navigation", em))
-        self._lbl_frame = gui.Label("—")
+        self._lbl_frame = gui.Label("-")
         self._lbl_frame.text_color = gui.Color(0.85, 0.85, 0.85)
         panel.add_child(self._lbl_frame)
-        self._lbl_npts = gui.Label("Points: —")
+        self._lbl_npts = gui.Label("Points: -")
         self._lbl_npts.text_color = gui.Color(0.6, 0.6, 0.6)
         panel.add_child(self._lbl_npts)
 
@@ -219,9 +221,14 @@ class TraversabilityViewer:
         panel.add_child(jump_row)
 
         cam = gui.Horiz(int(0.3 * em))
-        b_top   = gui.Button("Top  [F]");   b_top.set_on_clicked(self._look_top)
-        b_reset = gui.Button("Reset  [R]"); b_reset.set_on_clicked(self._reset_camera)
-        cam.add_stretch(); cam.add_child(b_top); cam.add_child(b_reset); cam.add_stretch()
+        b_top   = gui.Button("Top  [F]");    b_top.set_on_clicked(self._look_top)
+        b_lidar = gui.Button("LiDAR  [E]");  b_lidar.set_on_clicked(self._look_lidar)
+        b_reset = gui.Button("Reset  [R]");  b_reset.set_on_clicked(self._reset_camera)
+        cam.add_stretch()
+        cam.add_child(b_top)
+        cam.add_child(b_lidar)
+        cam.add_child(b_reset)
+        cam.add_stretch()
         panel.add_child(cam)
         panel.add_child(gui.Label(""))
 
@@ -240,8 +247,8 @@ class TraversabilityViewer:
             ("Traversable",         self.C_TRAV),
             ("Ground (unlabelled)", self.C_GROUND),
             ("Other points",        self.C_OTHER),
-            ("Trajectory — past",   self.C_TRAJ_PAST),
-            ("Trajectory — future", self.C_TRAJ_FUTURE),
+            ("Trajectory - past",   self.C_TRAJ_PAST),
+            ("Trajectory - future", self.C_TRAJ_FUTURE),
             ("Robot footprint",     self.C_ROBOT),
             ("Traversable trail",   self.C_TRAIL),
         ]:
@@ -265,10 +272,15 @@ class TraversabilityViewer:
         self._cb_robot.set_on_checked(lambda v: self._set_overlay("robot", v))
         panel.add_child(self._cb_robot)
 
-        self._cb_forward = gui.Checkbox("Forward labeling  [V]")
-        self._cb_forward.checked = self._forward_labeling
-        self._cb_forward.set_on_checked(self._on_forward_toggled)
-        panel.add_child(self._cb_forward)
+        self._cb_fwd_accum = gui.Checkbox("Forward accum  [V]")
+        self._cb_fwd_accum.checked = self._forward_accum
+        self._cb_fwd_accum.set_on_checked(self._on_fwd_accum_toggled)
+        panel.add_child(self._cb_fwd_accum)
+
+        self._cb_fwd_only = gui.Checkbox("Forward mask preview  [N]")
+        self._cb_fwd_only.checked = self._fwd_only
+        self._cb_fwd_only.set_on_checked(lambda v: self._set_fwd_only(v))
+        panel.add_child(self._cb_fwd_only)
         panel.add_child(gui.Label(""))
 
         # Accumulated scans
@@ -298,7 +310,7 @@ class TraversabilityViewer:
 
         # Traversable trail
         panel.add_child(self._sec("Traversable trail  [M]", em))
-        self._lbl_trail = gui.Label("Off — 0 pts")
+        self._lbl_trail = gui.Label("Off - 0 pts")
         self._lbl_trail.text_color = gui.Color(0.7, 0.7, 0.7)
         panel.add_child(self._lbl_trail)
         self._cb_trail = gui.Checkbox("Record while navigating")
@@ -312,7 +324,7 @@ class TraversabilityViewer:
 
         # Traversability stats
         panel.add_child(self._sec("Stats", em))
-        self._lbl_stats = gui.Label("—")
+        self._lbl_stats = gui.Label("-")
         self._lbl_stats.text_color = gui.Color(0.75, 0.75, 0.75)
         panel.add_child(self._lbl_stats)
         panel.add_child(gui.Label(""))
@@ -363,6 +375,7 @@ class TraversabilityViewer:
         if k in (gui.KeyName.LEFT,  ord("h"), ord("H")): self._on_prev();          return H
         if k in (ord("r"), ord("R")): self._reset_camera();                         return H
         if k in (ord("f"), ord("F")): self._look_top();                             return H
+        if k in (ord("e"), ord("E")): self._look_lidar();                           return H
         if k in (ord("t"), ord("T")): self._on_cycle_mode();                        return H
         if k in (ord("j"), ord("J")):
             self._show_trajectory = not self._show_trajectory
@@ -380,8 +393,12 @@ class TraversabilityViewer:
             self._update_trail_label()
             return H
         if k in (ord("v"), ord("V")):
-            self._on_forward_toggled(not self._forward_labeling)
-            self._cb_forward.checked = self._forward_labeling
+            self._on_fwd_accum_toggled(not self._forward_accum)
+            self._cb_fwd_accum.checked = self._forward_accum
+            return H
+        if k in (ord("n"), ord("N")):
+            self._set_fwd_only(not self._fwd_only)
+            self._cb_fwd_only.checked = self._fwd_only
             return H
         return gui.Widget.EventCallbackResult.IGNORED
 
@@ -396,7 +413,7 @@ class TraversabilityViewer:
     def _on_slider_changed(self, val: float) -> None:
         if self._updating:
             return
-        new_idx = int(val)
+        new_idx = max(0, min(int(val), len(self.seq) - 1))
         if new_idx != self.current_idx:
             self.current_idx = new_idx
             self._refresh()
@@ -424,10 +441,14 @@ class TraversabilityViewer:
             span = (n - 1) * s
             self._lbl_accum.text = f"N = {n}  step = {s}  (~{span} scans back)"
 
-    def _on_forward_toggled(self, active: bool) -> None:
-        self._forward_labeling = active
-        self.labeler.use_forward_labeling = active
-        # Invalidate label cache so next refresh recomputes with new setting.
+    def _set_fwd_only(self, active: bool) -> None:
+        self._fwd_only = active
+        self._refresh()
+
+    def _on_fwd_accum_toggled(self, active: bool) -> None:
+        self._forward_accum = active
+        self.labeler.forward_accum = active
+        # Invalidate label cache - accumulated clouds change with this setting.
         self._label_cache.clear()
         self._refresh()
 
@@ -444,7 +465,7 @@ class TraversabilityViewer:
     def _update_trail_label(self) -> None:
         n = len(self._trav_trail_world) if self._trav_trail_world is not None else 0
         state = "On" if self._trail_active else "Off"
-        self._lbl_trail.text = f"{state} — {n:,} pts"
+        self._lbl_trail.text = f"{state} - {n:,} pts"
 
     def _on_cycle_mode(self) -> None:
         self._display_mode = (self._display_mode + 1) % len(DISPLAY_MODES)
@@ -511,7 +532,7 @@ class TraversabilityViewer:
         if self._n_accum > 1 and self.poses is not None:
             # Accumulate past scans with origin tracking.
             # label_accumulated ensures each point is only matched against poses
-            # AFTER it was observed — preventing people at past robot positions
+            # AFTER it was observed - preventing people at past robot positions
             # from being labeled as traversable.
             xyz_disp, intensity_disp, scan_origins = self._accumulate_scans(
                 idx, xyz, intensity
@@ -541,6 +562,13 @@ class TraversabilityViewer:
             f"(current scan, {len(xyz):,} pts)"
         )
 
+        # Forward-only preview: keep only points in the forward half-space.
+        if self._fwd_only and self.poses is not None:
+            fmask = self.labeler.forward_mask(xyz_disp, self.poses, idx)
+            xyz_disp       = xyz_disp[fmask]
+            intensity_disp = intensity_disp[fmask]
+            labels_disp    = labels_disp[fmask]
+
         self._update_cloud(xyz_disp, intensity_disp, labels_disp)
         self._update_trav_trail(idx)
         self._refresh_overlays(xyz)
@@ -566,7 +594,7 @@ class TraversabilityViewer:
 
         Returns xyz, intensity, and scan_origins (origin scan index per point).
         The scan_origins array is passed to label_accumulated so that each point
-        is only matched against poses AFTER it was observed — preventing dynamic
+        is only matched against poses AFTER it was observed - preventing dynamic
         objects at former robot positions from being labeled as traversable.
         """
         T_scan_world = np.linalg.inv(self.poses[current_idx])
@@ -585,9 +613,17 @@ class TraversabilityViewer:
         for k in range(past_start, current_idx, step):
             xyz_k, intensity_k = self._get_scan(k)
 
-            step = max(1, len(xyz_k) // MAX_PTS)
-            xyz_k       = xyz_k[::step]
-            intensity_k = intensity_k[::step]
+            # Forward filter: only keep points that were ahead of the robot at scan k.
+            if self._forward_accum:
+                fmask = self.labeler.forward_mask(xyz_k, self.poses, k)
+                xyz_k       = xyz_k[fmask]
+                intensity_k = intensity_k[fmask]
+            if len(xyz_k) == 0:
+                continue
+
+            ds = max(1, len(xyz_k) // MAX_PTS)
+            xyz_k       = xyz_k[::ds]
+            intensity_k = intensity_k[::ds]
 
             T_scan_k = T_scan_world @ self.poses[k]
             R, t = T_scan_k[:3, :3], T_scan_k[:3, 3]
@@ -742,6 +778,8 @@ class TraversabilityViewer:
         hi           = min(len(self.poses), idx + win + 1)
 
         def _build_ls(indices: list):
+            if not indices:
+                return None
             raw = [(T_scan_world @ self.poses[k])[:3, 3] for k in indices]
             # Filter consecutive near-duplicate points (avoids zero-AABB crash).
             pts = [raw[0]]
@@ -826,3 +864,36 @@ class TraversabilityViewer:
             [0.0, 0.0, alt],
             [1.0, 0.0, 0.0],
         )
+
+    def _look_lidar(self) -> None:
+        """First-person view: camera at sensor origin looking in the direction of travel."""
+        # Determine forward direction in scan-local frame.
+        # Default to +x if poses are unavailable or robot is stationary.
+        fwd = np.array([1.0, 0.0])
+        if self.poses is not None:
+            idx = self.current_idx
+            T_scan_world = np.linalg.inv(self.poses[idx])
+            if idx + 1 < len(self.poses):
+                other = (T_scan_world @ self.poses[idx + 1])[:3, 3]
+            elif idx > 0:
+                other = -(T_scan_world @ self.poses[idx - 1])[:3, 3]
+            else:
+                other = np.array([1.0, 0.0, 0.0])
+            norm = np.linalg.norm(other[:2])
+            if norm > 1e-6:
+                fwd = other[:2] / norm
+
+        eye    = [0.0, 0.0, 0.3]
+        center = [float(fwd[0]) * 20.0, float(fwd[1]) * 20.0, 0.0]
+        up     = [0.0, 0.0, 1.0]
+
+        # setup_camera recalibrates the near/far clipping planes based on the
+        # current scene bounds - necessary because a camera at the origin would
+        # otherwise be clipped by the near plane set during the initial view.
+        # look_at then overrides the camera position to the sensor origin.
+        xyz, _ = self._get_scan(self.current_idx)
+        pcd = o3d.geometry.PointCloud()
+        pcd.points = o3d.utility.Vector3dVector(xyz.astype(np.float64))
+        bounds = pcd.get_axis_aligned_bounding_box()
+        self._scene.setup_camera(70.0, bounds, center)
+        self._scene.scene.camera.look_at(center, eye, up)

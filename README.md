@@ -34,7 +34,7 @@ data/rellis/
 ├── Rellis-3D/
 │   ├── 00000/
 │   │   ├── os1_cloud_node_kitti_bin/   # *.bin point clouds (XYZI float32)
-│   │   └── poses.txt                   # optional — KITTI-format poses (12 values/line)
+│   │   └── poses.txt                   # optional - KITTI-format poses (12 values/line)
 │   ├── 00001/ ...
 ├── pt_train.lst
 └── pt_val.lst
@@ -68,8 +68,8 @@ python -m src.visualization --seq data/rellis/00000 --config configs/example.yam
 
 | Key | Action |
 |-----|--------|
-| `→` / `L` | Next scan |
-| `←` / `H` | Previous scan |
+| `->` / `L` | Next scan |
+| `<-` / `H` | Previous scan |
 | `T` | Cycle colour mode (Traversability / Intensity / Height) |
 | `J` | Toggle trajectory |
 | `K` | Toggle robot footprint |
@@ -77,7 +77,7 @@ python -m src.visualization --seq data/rellis/00000 --config configs/example.yam
 | `F` | Top-down view |
 | `R` | Reset camera |
 
-**Accumulate scans panel** — set *N* (how many past scans to stack) and *step* (every K-th scan).  With N=10 and step=5, the viewer stacks 10 scans spaced 5 apart, reaching 45 scans into the past without multiplying the point count.
+**Accumulate scans panel** - set *N* (how many past scans to stack) and *step* (every K-th scan).  With N=10 and step=5, the viewer stacks 10 scans spaced 5 apart, reaching 45 scans into the past without multiplying the point count.
 
-**Traversable trail** — when recording is on, traversable points from each visited scan are accumulated in world coordinates (magenta). Useful to visualise the complete traversed path across the sequence. Capped at 500 k points; use *Clear* to reset.
+**Traversable trail** - when recording is on, traversable points from each visited scan are accumulated in world coordinates (magenta). Useful to visualise the complete traversed path across the sequence. Capped at 500 k points; use *Clear* to reset.
 

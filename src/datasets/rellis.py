@@ -58,7 +58,7 @@ class Rellis3DSequence:
 
     @staticmethod
     def _load_kitti_poses(path: Path) -> List[np.ndarray]:
-        """Read KITTI-format poses: 12 floats per line → 4×4 matrix."""
+        """Read KITTI-format poses: 12 floats per line -> 4×4 matrix."""
         poses = []
         with open(path) as f:
             for line in f:
