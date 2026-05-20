@@ -2,13 +2,17 @@
 CLI entry point for the traversability viewer.
 
 Usage:
-    python -m src.visualization --seq data/rellis/00000 --config configs/example.yaml
-    python -m src.visualization --seq data/rellis/00000 --config configs/example.yaml \\
-        --labels output/labels/00000 --idx 50
+    # RELLIS-3D (auto-detects os1_cloud_node_kitti_bin layout):
+    python -m src.visualization --seq data/rellis/00000 --config configs/example_rellis.yaml
 
-If the sequence has a poses.txt file, labels are computed on-the-fly.
-Without poses, the viewer shows only the raw point cloud (use --labels to
-load pre-computed .trav files instead).
+    # TartanDrive (pass dataset root or specific sequence dir):
+    python -m src.visualization --seq data/tartandrive_data/ --config configs/example_tartan.yaml
+
+    # Generic KITTI dataset (point clouds in velodyne/):
+    python -m src.visualization --seq /data/kitti/00 --cloud-subdir velodyne
+
+    # From pre-computed .trav files:
+    python -m src.visualization --seq data/rellis/00000 --labels output/labels/00000
 """
 
 from __future__ import annotations
@@ -21,9 +25,11 @@ import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
-from src.datasets.rellis import Rellis3DSequence
+from src.datasets.kitti_sequence import KittiSequence
+from src.datasets.rellis import RELLIS_CLOUD_SUBDIR
+from src.datasets.tartandrive import TartanDriveSequence, load_vehicle_lidar_tf
+from src.robot import Robot
 from src.traversability.labeler import TraversabilityLabeler
-from src.traversability.icp import compute_sequence_poses
 from src.visualization.viewer import TraversabilityViewer
 
 
@@ -36,67 +42,148 @@ def _get(cfg: dict, *keys, default=None):
     return val
 
 
+def _find_tartandrive_seq(root: Path, lidar_subdir: str) -> Path | None:
+    """Return the first sequence directory that contains <lidar_subdir>/*.npy."""
+    # Direct match
+    if any((root / lidar_subdir).glob("*.npy")):
+        return root
+    # One level deep (e.g. root/<seq>/livox/)
+    for candidate in sorted(root.iterdir()):
+        if candidate.is_dir() and any((candidate / lidar_subdir).glob("*.npy")):
+            return candidate
+    # Two levels deep (TartanDrive double-named structure: root/<seq>/<seq>/livox/)
+    for top in sorted(root.iterdir()):
+        if not top.is_dir():
+            continue
+        for candidate in sorted(top.iterdir()):
+            if candidate.is_dir() and any((candidate / lidar_subdir).glob("*.npy")):
+                return candidate
+    return None
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Interactive traversability viewer for RELLIS-3D sequences.",
+        description="Interactive traversability viewer for LiDAR sequences.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # On-the-fly labeling (requires poses.txt in the sequence directory):
-  python -m src.visualization --seq data/rellis/00000 --config configs/example.yaml
+  # RELLIS-3D (auto-detects layout):
+  python -m src.visualization --seq data/rellis/00000 --config configs/example_rellis.yaml
+
+  # TartanDrive (dataset root or specific seq dir):
+  python -m src.visualization --seq data/tartandrive_data/ --config configs/example_tartan.yaml
+
+  # Generic KITTI dataset:
+  python -m src.visualization --seq /data/kitti/sequences/00 --cloud-subdir velodyne
 
   # From pre-computed .trav files:
-  python -m src.visualization --seq data/rellis/00000 --config configs/example.yaml \\
-      --labels output/labels/00000
+  python -m src.visualization --seq data/rellis/00000 \\
+      --labels output/labels/00000 --config configs/example_rellis.yaml
 
   # Start at a specific scan index:
-  python -m src.visualization --seq data/rellis/00000 --config configs/example.yaml --idx 100
+  python -m src.visualization --seq data/rellis/00000 --idx 100
         """,
     )
-    parser.add_argument("--seq",    required=True, help="Path to the sequence directory (e.g. data/rellis/00000)")
-    parser.add_argument("--config", default="configs/example.yaml", help="Config YAML (default: configs/example.yaml)")
+    parser.add_argument("--seq",    required=True, help="Path to the sequence directory (or dataset root for TartanDrive)")
+    parser.add_argument("--config", default="configs/example_rellis.yaml", help="Config YAML")
     parser.add_argument("--labels", default=None, help="Directory with pre-computed .trav label files (optional)")
     parser.add_argument("--idx",    type=int, default=0, help="Starting scan index (default: 0)")
+    parser.add_argument(
+        "--cloud-subdir", default=None,
+        help=(
+            "Sub-directory containing point cloud files relative to --seq. "
+            f"Auto-detected: RELLIS '{RELLIS_CLOUD_SUBDIR}', TartanDrive npy, then 'velodyne'."
+        ),
+    )
     args = parser.parse_args()
 
     # Load config
     with open(args.config) as f:
         cfg = yaml.safe_load(f)
 
-    max_rad      = _get(cfg, "data",    "max_rad",          default=50.0)
-    icp_required  = _get(cfg, "setting", "icp_required",  default=False)
-    forward_accum = _get(cfg, "setting", "forward_accum", default=False)
-    robot_shape  = _get(cfg, "robot",   "shape",            default="square")
-    robot_size   = _get(cfg, "robot",   "size",             default=1.0)
-    height_min   = _get(cfg, "robot",   "height_min",       default=-0.5)
-    height_max   = _get(cfg, "robot",   "height_max",       default=0.3)
-    traj_window  = _get(cfg, "robot",   "trajectory_window",default=100)
+    max_rad       = _get(cfg, "data",    "max_rad",           default=50.0)
+    forward_accum = _get(cfg, "setting", "forward_accum",     default=False)
+    robot_shape   = _get(cfg, "robot",   "shape",             default="square")
+    robot_size    = _get(cfg, "robot",   "size",              default=1.0)
+    height_min    = _get(cfg, "robot",   "height_min",        default=-0.5)
+    height_max    = _get(cfg, "robot",   "height_max",        default=0.3)
+    traj_window   = _get(cfg, "robot",   "trajectory_window", default=100)
+    robot = Robot(shape=robot_shape, size=robot_size,
+                  height_min=height_min, height_max=height_max)
+    lidar_subdir_cfg       = _get(cfg, "data", "lidar_subdir",        default=None)
+    odom_subdir_cfg        = _get(cfg, "data", "odom_subdir",         default="super_odom")
+    lidar_poses_subdir_cfg = _get(cfg, "data", "lidar_poses_subdir",  default="lidar_poses")
+    tf_file_cfg            = _get(cfg, "data", "static_tf_file",      default=None)
+    tf_key_cfg             = _get(cfg, "data", "lidar_tf_key",        default=None)
+    T_vehicle_lidar  = (
+        load_vehicle_lidar_tf(tf_file_cfg, tf_key_cfg)
+        if tf_file_cfg and tf_key_cfg else None
+    )
 
-    # Load sequence - try path as-is, then with Rellis-3D/ inserted
-    seq_path = Path(args.seq)
-    if not (seq_path / "os1_cloud_node_kitti_bin").exists():
-        candidate = seq_path.parent / "Rellis-3D" / seq_path.name
-        if (candidate / "os1_cloud_node_kitti_bin").exists():
-            seq_path = candidate
-    print(f"Loading sequence: {seq_path}")
-    seq = Rellis3DSequence(str(seq_path), max_rad=max_rad)
+    seq_path     = Path(args.seq)
+    cloud_subdir = args.cloud_subdir
+    use_npy      = False  # TartanDrive flag
+
+    if cloud_subdir is None:
+        # 1. RELLIS layout
+        for candidate in (seq_path, seq_path.parent / "Rellis-3D" / seq_path.name):
+            if (candidate / RELLIS_CLOUD_SUBDIR).exists():
+                seq_path = candidate
+                cloud_subdir = RELLIS_CLOUD_SUBDIR
+                break
+
+        # 2. TartanDrive npy layout — check subdir from config first, then "livox"
+        if cloud_subdir is None:
+            for lidar_sub in filter(None, [lidar_subdir_cfg, "livox"]):
+                found = _find_tartandrive_seq(seq_path, lidar_sub)
+                if found is not None:
+                    seq_path = found
+                    cloud_subdir = lidar_sub
+                    use_npy = True
+                    break
+
+        # 3. Standard KITTI velodyne/
+        if cloud_subdir is None:
+            cloud_subdir = "velodyne"
+    else:
+        # Explicit subdir: detect format by file extension
+        cloud_dir_explicit = seq_path / cloud_subdir
+        if cloud_dir_explicit.is_dir() and any(cloud_dir_explicit.glob("*.npy")):
+            use_npy = True
+
+    print(f"Loading sequence : {seq_path}")
+    print(f"  Cloud sub-dir  : {cloud_subdir}  ({'npy' if use_npy else 'bin'})")
+
+    if use_npy:
+        seq = TartanDriveSequence(
+            seq_dir=str(seq_path),
+            lidar_subdir=cloud_subdir,
+            odom_subdir=odom_subdir_cfg,
+            lidar_poses_subdir=lidar_poses_subdir_cfg,
+            max_rad=max_rad,
+            robot=robot,
+            T_vehicle_lidar=T_vehicle_lidar,
+        )
+    else:
+        seq = KittiSequence(
+            cloud_dir=str(seq_path / cloud_subdir),
+            poses_file=str(seq_path / "poses.txt"),
+            max_rad=max_rad,
+            robot=robot,
+        )
+
     print(f"  {len(seq)} scans found.")
 
     # Resolve poses
     poses = None
     if seq.has_poses():
         poses = seq.poses
-        print(f"  Poses loaded from poses.txt ({len(poses)} entries).")
+        print(f"  Poses loaded ({len(poses)} entries).")
     elif args.labels is not None:
-        print("  No poses.txt - will load labels from files.")
-    elif icp_required:
-        print("  No poses.txt - computing poses via ICP (this may take a moment) ...")
-        scans_xyz = [seq.get_scan(i)[0] for i in range(len(seq))]
-        poses = compute_sequence_poses(scans_xyz)
-        print(f"  ICP done: {len(poses)} poses computed.")
+        print("  No poses — will load labels from files.")
     else:
         print(
-            "  WARNING: no poses.txt found and icp_required=False.\n"
+            "  WARNING: no poses found.\n"
             "  Trajectory and on-the-fly labels will be unavailable.\n"
             "  Use --labels to load pre-computed .trav files."
         )

@@ -13,6 +13,8 @@ Keyboard shortcuts:
     T       cycle colour mode  (traversability / intensity / height)
     J       toggle trajectory
     K       toggle robot footprint
+    V       toggle forward-only accumulation
+    N       toggle forward-mask preview
 """
 
 from __future__ import annotations
@@ -103,7 +105,8 @@ class TraversabilityViewer:
         self._show_robot = True
         self._show_trail_pts = True
         self._display_mode = 0  # index into DISPLAY_MODES
-        self._n_accum = 1       # number of scans to accumulate (window count)
+        self._n_past = 0        # number of past scans to accumulate
+        self._n_future = 0      # number of future scans to accumulate
         self._accum_step = 1    # stride between accumulated scans
         self._forward_accum = labeler.forward_accum
         self._fwd_only = False
@@ -137,7 +140,8 @@ class TraversabilityViewer:
         self._cb_fwd_only:  Optional[gui.Checkbox] = None
         self._idx_slider: Optional[gui.Slider] = None
         self._num_edit: Optional[gui.NumberEdit] = None
-        self._accum_slider: Optional[gui.Slider] = None
+        self._past_slider: Optional[gui.Slider] = None
+        self._future_slider: Optional[gui.Slider] = None
         self._step_slider: Optional[gui.Slider] = None
         self._mat = None
         self._line_mat = None
@@ -293,18 +297,27 @@ class TraversabilityViewer:
 
         # Accumulated scans
         panel.add_child(self._sec("Accumulate scans", em))
-        self._lbl_accum = gui.Label("N = 1  (current only)")
+        self._lbl_accum = gui.Label("Past: 0  Future: 0  (current only)")
         self._lbl_accum.text_color = gui.Color(0.7, 0.7, 0.7)
         panel.add_child(self._lbl_accum)
 
-        lbl_n = gui.Label("Window N (scans)")
-        lbl_n.text_color = gui.Color(0.55, 0.55, 0.55)
-        panel.add_child(lbl_n)
-        self._accum_slider = gui.Slider(gui.Slider.INT)
-        self._accum_slider.set_limits(1, 50)
-        self._accum_slider.int_value = 1
-        self._accum_slider.set_on_value_changed(self._on_accum_changed)
-        panel.add_child(self._accum_slider)
+        lbl_past = gui.Label("Past scans N")
+        lbl_past.text_color = gui.Color(0.55, 0.55, 0.55)
+        panel.add_child(lbl_past)
+        self._past_slider = gui.Slider(gui.Slider.INT)
+        self._past_slider.set_limits(0, 50)
+        self._past_slider.int_value = 0
+        self._past_slider.set_on_value_changed(self._on_past_changed)
+        panel.add_child(self._past_slider)
+
+        lbl_future = gui.Label("Future scans M")
+        lbl_future.text_color = gui.Color(0.55, 0.55, 0.55)
+        panel.add_child(lbl_future)
+        self._future_slider = gui.Slider(gui.Slider.INT)
+        self._future_slider.set_limits(0, 50)
+        self._future_slider.int_value = 0
+        self._future_slider.set_on_value_changed(self._on_future_changed)
+        panel.add_child(self._future_slider)
 
         lbl_step = gui.Label("Step (every K-th scan)")
         lbl_step.text_color = gui.Color(0.55, 0.55, 0.55)
@@ -434,8 +447,13 @@ class TraversabilityViewer:
         self.current_idx = idx
         self._refresh()
 
-    def _on_accum_changed(self, val: float) -> None:
-        self._n_accum = int(val)
+    def _on_past_changed(self, val: float) -> None:
+        self._n_past = int(val)
+        self._update_accum_label()
+        self._refresh()
+
+    def _on_future_changed(self, val: float) -> None:
+        self._n_future = int(val)
         self._update_accum_label()
         self._refresh()
 
@@ -445,12 +463,16 @@ class TraversabilityViewer:
         self._refresh()
 
     def _update_accum_label(self) -> None:
-        n, s = self._n_accum, self._accum_step
-        if n == 1:
-            self._lbl_accum.text = "N = 1  (current only)"
+        n, m, s = self._n_past, self._n_future, self._accum_step
+        if n == 0 and m == 0:
+            self._lbl_accum.text = "Past: 0  Future: 0  (current only)"
         else:
-            span = (n - 1) * s
-            self._lbl_accum.text = f"N = {n}  step = {s}  (~{span} scans back)"
+            parts = []
+            if n > 0:
+                parts.append(f"Past: {n}  (~{n*s} scans)")
+            if m > 0:
+                parts.append(f"Future: {m}  (~{m*s} scans)")
+            self._lbl_accum.text = "  ".join(parts) + f"  step={s}"
 
     def _set_fwd_only(self, active: bool) -> None:
         self._fwd_only = active
@@ -558,11 +580,10 @@ class TraversabilityViewer:
             self._num_edit.int_value = idx
         self._updating = False
 
-        if self._n_accum > 1 and self.poses is not None:
-            # Accumulate past scans with origin tracking.
+        if (self._n_past > 0 or self._n_future > 0) and self.poses is not None:
+            # Accumulate past and/or future scans with origin tracking.
             # label_accumulated ensures each point is only matched against poses
-            # AFTER it was observed - preventing people at past robot positions
-            # from being labeled as traversable.
+            # AFTER it was observed - correct for both past and future scans.
             xyz_disp, intensity_disp, scan_origins = self._accumulate_scans(
                 idx, xyz, intensity
             )
@@ -637,12 +658,16 @@ class TraversabilityViewer:
         intensity_curr: np.ndarray,
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """
-        Stack the last n_accum scans, each transformed into the current scan's frame.
+        Stack past and future scans into the current scan's coordinate frame.
 
         Returns xyz, intensity, and scan_origins (origin scan index per point).
         The scan_origins array is passed to label_accumulated so that each point
-        is only matched against poses AFTER it was observed - preventing dynamic
-        objects at former robot positions from being labeled as traversable.
+        is only matched against poses AFTER it was observed.
+
+        - Past scan points: forward-filter optionally applied; each point labeled
+          by poses after its origin scan.
+        - Future scan points: labeled by poses after the future scan's index,
+          showing terrain that the robot will traverse later.
         """
         T_scan_world = np.linalg.inv(self.poses[current_idx])
 
@@ -650,35 +675,37 @@ class TraversabilityViewer:
         all_intensity = [intensity_curr]
         all_origins   = [np.full(len(xyz_curr), current_idx, dtype=np.int32)]
 
-        n_past = self._n_accum - 1
-        step   = self._accum_step
+        step    = self._accum_step
         MAX_PTS = 20_000
 
-        # Sample every `step`-th scan going back n_past steps, covering
-        # up to n_past*step scans into the past.
-        past_start = max(0, current_idx - n_past * step)
-        for k in range(past_start, current_idx, step):
+        def _transform_scan(k: int, apply_fwd_filter: bool) -> None:
             xyz_k, intensity_k = self._get_scan(k)
-
-            # Forward filter: only keep points that were ahead of the robot at scan k.
-            if self._forward_accum:
+            if apply_fwd_filter and self._forward_accum:
                 fmask = self.labeler.forward_mask(xyz_k, self.poses, k)
                 xyz_k       = xyz_k[fmask]
                 intensity_k = intensity_k[fmask]
             if len(xyz_k) == 0:
-                continue
-
+                return
             ds = max(1, len(xyz_k) // MAX_PTS)
             xyz_k       = xyz_k[::ds]
             intensity_k = intensity_k[::ds]
-
             T_scan_k = T_scan_world @ self.poses[k]
             R, t = T_scan_k[:3, :3], T_scan_k[:3, 3]
-            xyz_in_curr = (R @ xyz_k.T).T + t
-
-            all_xyz.append(xyz_in_curr.astype(np.float32))
+            all_xyz.append(((R @ xyz_k.T).T + t).astype(np.float32))
             all_intensity.append(intensity_k)
-            all_origins.append(np.full(len(xyz_in_curr), k, dtype=np.int32))
+            all_origins.append(np.full(len(xyz_k), k, dtype=np.int32))
+
+        # Past scans: go back n_past*step frames, sample every step-th
+        if self._n_past > 0:
+            past_start = max(0, current_idx - self._n_past * step)
+            for k in range(past_start, current_idx, step):
+                _transform_scan(k, apply_fwd_filter=True)
+
+        # Future scans: go forward n_future*step frames, sample every step-th
+        if self._n_future > 0:
+            future_end = min(len(self.seq), current_idx + self._n_future * step + 1)
+            for k in range(current_idx + step, future_end, step):
+                _transform_scan(k, apply_fwd_filter=False)
 
         return (
             np.vstack(all_xyz),

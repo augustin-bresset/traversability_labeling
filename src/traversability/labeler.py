@@ -112,10 +112,15 @@ class TraversabilityLabeler:
 
         for k in range(lo, hi):
             T_scan_k = T_scan_world @ poses[k]
-            traj_xy = T_scan_k[:2, 3]
-            dx = xyz_c[:, 0] - traj_xy[0]
-            dy = xyz_c[:, 1] - traj_xy[1]
-            labels[candidates[self._in_footprint(dx, dy)]] = 1
+            traj_xy  = T_scan_k[:2, 3]
+            R_2d     = T_scan_k[:2, :2]   # rotation: robot body → scan frame
+
+            # Displacement in scan frame, then rotated into robot body frame
+            # so that the footprint shape aligns with the robot's heading.
+            delta        = xyz_c[:, :2] - traj_xy   # (M, 2) in scan frame
+            delta_robot  = delta @ R_2d              # (M, 2) in robot frame
+
+            labels[candidates[self._in_footprint(delta_robot[:, 0], delta_robot[:, 1])]] = 1
 
         return labels
 
@@ -136,7 +141,7 @@ class TraversabilityLabeler:
 
         Args:
             xyz:         (N, 3) scan points in current_idx's local frame.
-            poses:       List of 4×4 world-frame poses.
+            poses:       List of 4x4 world-frame poses.
             current_idx: Index of the current scan.
             traj_lo:     First trajectory pose to check (default: current_idx + 1).
             traj_hi:     One-past-last pose to check (default: current_idx + window + 1).
@@ -178,7 +183,7 @@ class TraversabilityLabeler:
         Args:
             xyz_acc:      (N, 3) accumulated points, all in current_idx's frame.
             scan_origins: (N,) int array - origin scan index for each point.
-            poses:        List of 4×4 world-frame poses.
+            poses:        List of 4x4 world-frame poses.
             current_idx:  Reference scan (defines the coordinate frame).
 
         Returns:

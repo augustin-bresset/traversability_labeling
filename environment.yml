@@ -1,4 +1,4 @@
-name: trav_loss
+name: trav_label
 channels:
   - defaults
   - conda-forge

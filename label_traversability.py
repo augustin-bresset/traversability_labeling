@@ -1,17 +1,22 @@
 """
-Traversability labeling pipeline for RELLIS-3D.
+Traversability labeling pipeline for LiDAR sequences.
 
 For each scan in a sequence:
   1. Load the point cloud.
-  2. Load or compute robot poses (ICP if icp_required=True).
+  2. Load robot poses (required — the sequence must provide them).
   3. Label each point as traversable (1) or not (0) based on robot footprint
      along the trajectory window.
-  4. Save labels as <stem>.trav (binary uint8 array, same order as .bin points).
+  4. Save labels as <stem>.trav (binary uint8 array, same order as input points).
 
 Usage:
-    python label_traversability.py [--config configs/example.yaml]
-                                   [--split train]
-                                   [--output output/labels]
+    # RELLIS-3D split:
+    python label_traversability.py --dataset rellis [--config configs/example_rellis.yaml] [--split train]
+
+    # TartanDrive dataset:
+    python label_traversability.py --dataset tartandrive [--config configs/example_tartan.yaml]
+
+    # Single sequence (any KITTI-format dataset):
+    python label_traversability.py --seq /data/myseq --cloud-subdir velodyne
 """
 
 from __future__ import annotations
@@ -26,9 +31,10 @@ import yaml
 # Allow running from repo root without installing the package.
 sys.path.insert(0, str(Path(__file__).parent))
 
-from src.datasets.rellis import Rellis3D, Rellis3DSequence
+from src.datasets.rellis import KittiSequence, Rellis3D, RELLIS_CLOUD_SUBDIR
+from src.datasets.tartandrive import TartanDrive, TartanDriveSequence, load_vehicle_lidar_tf
+from src.robot import Robot
 from src.traversability.labeler import TraversabilityLabeler
-from src.traversability.icp import compute_sequence_poses
 
 
 # ---------------------------------------------------------------------------
@@ -55,32 +61,27 @@ def _get(cfg: dict, *keys, default=None):
 # ---------------------------------------------------------------------------
 
 def process_sequence(
-    seq: Rellis3DSequence,
+    seq,
     labeler: TraversabilityLabeler,
-    icp_required: bool,
     output_dir: Path,
     accum_window: int = 20,
 ) -> None:
     n = len(seq)
-    print(f"  Sequence {seq.name}: {n} scans", flush=True)
+    n_target = len(seq.target_indices) if seq.target_indices is not None else n
+    print(f"  Sequence {seq.name}: {n} scans total, {n_target} to label", flush=True)
 
-    # Load all scans up-front (needed for ICP and label loop).
+    if not seq.has_poses():
+        raise RuntimeError(
+            f"Sequence {seq.name} has no poses — cannot label without odometry."
+        )
+    poses = seq.poses
+
+    # Load all scans up-front — non-target frames are still needed as
+    # accumulation context for nearby target frames.
     scans_xyz = []
     for i in range(n):
         xyz, _ = seq.get_scan(i)
         scans_xyz.append(xyz)
-
-    # Resolve poses.
-    if seq.has_poses():
-        poses = seq.poses
-    elif icp_required:
-        print(f"    No poses.txt found - computing poses via ICP ...", flush=True)
-        poses = compute_sequence_poses(scans_xyz)
-    else:
-        raise RuntimeError(
-            f"Sequence {seq.name} has no poses.txt and icp_required=False in config.\n"
-            "Either provide a poses.txt file or set icp_required: True."
-        )
 
     if len(poses) != n:
         raise ValueError(
@@ -100,12 +101,9 @@ def process_sequence(
     total_pts  = 0
 
     for i, cloud_file in enumerate(seq.cloud_files):
-        xyz_i, _ = scans_xyz[i], None  # already loaded
+        if seq.target_indices is not None and i not in seq.target_indices:
+            continue  # not in split — skip computation and output
 
-        # Accumulate past scans into scan i's frame.
-        # With forward_accum=True, only keep points that were ahead of the robot
-        # at the time each past scan was taken - this prevents people or objects
-        # behind the vehicle from entering the accumulated cloud.
         T_scan_world = np.linalg.inv(poses[i])
         all_xyz      = [scans_xyz[i]]
         all_origins  = [np.full(len(scans_xyz[i]), i, dtype=np.int32)]
@@ -152,28 +150,54 @@ def process_sequence(
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Label traversability in RELLIS-3D point clouds."
+        description="Label traversability in LiDAR sequences."
     )
-    parser.add_argument("--config",  default="configs/example.yaml", help="Config YAML")
-    parser.add_argument("--split",   default="train",                 help="train / val / test")
-    parser.add_argument("--output",  default="output/labels",         help="Output directory")
+    parser.add_argument("--config",  default="configs/example_rellis.yaml", help="Config YAML")
+    parser.add_argument("--output",  default="output/labels",               help="Output directory")
+    parser.add_argument(
+        "--dataset", default=None, choices=["rellis", "tartandrive"],
+        help="Dataset mode: 'rellis' or 'tartandrive' (reads root from config data.source)",
+    )
+    # RELLIS-3D split mode
+    parser.add_argument("--split",   default=None,
+                        help="RELLIS-3D split: train / val / test / all  "
+                             "(all = every sequence, every frame, no .lst filtering)")
+    # Single-sequence mode
+    parser.add_argument("--seq",     default=None, help="Path to a single sequence directory")
+    parser.add_argument(
+        "--cloud-subdir", default=None,
+        help=(
+            f"Sub-directory with *.bin files inside --seq "
+            f"(default: auto-detect RELLIS '{RELLIS_CLOUD_SUBDIR}', then 'velodyne')"
+        ),
+    )
     args = parser.parse_args()
+
+    # Back-compat: --split implies --dataset rellis
+    if args.split is not None and args.dataset is None:
+        args.dataset = "rellis"
+
+    if args.seq is None and args.dataset is None:
+        parser.error(
+            "Provide one of: --dataset rellis [--split ...], --dataset tartandrive, "
+            "or --seq (single sequence)."
+        )
 
     cfg = load_config(args.config)
 
-    root_dir     = _get(cfg, "data",    "source",       default="data/rellis/")
-    max_rad      = _get(cfg, "data",    "max_rad",       default=50.0)
-    icp_required   = _get(cfg, "setting", "icp_required",  default=False)
-    forward_accum  = _get(cfg, "setting", "forward_accum", default=False)
+    max_rad       = _get(cfg, "data",    "max_rad",            default=50.0)
+    forward_accum = _get(cfg, "setting", "forward_accum",      default=False)
+    robot_shape   = _get(cfg, "robot",   "shape",              default="square")
+    robot_size    = _get(cfg, "robot",   "size",               default=1.0)
+    height_min    = _get(cfg, "robot",   "height_min",         default=-0.5)
+    height_max    = _get(cfg, "robot",   "height_max",         default=0.3)
+    traj_window   = _get(cfg, "robot",   "trajectory_window",  default=100)
+    accum_window  = _get(cfg, "robot",   "accum_window",       default=20)
 
-    robot_shape  = _get(cfg, "robot", "shape",           default="square")
-    robot_size   = _get(cfg, "robot", "size",            default=1.0)
-    height_min   = _get(cfg, "robot", "height_min",      default=-0.5)
-    height_max   = _get(cfg, "robot", "height_max",      default=0.3)
-    traj_window  = _get(cfg, "robot", "trajectory_window", default=100)
-    accum_window = _get(cfg, "robot", "accum_window",      default=20)
-
-    dataset = Rellis3D(root_dir=root_dir, split=args.split, max_rad=max_rad)
+    robot = Robot(
+        shape=robot_shape, size=robot_size,
+        height_min=height_min, height_max=height_max,
+    )
     labeler = TraversabilityLabeler(
         robot_shape=robot_shape,
         robot_size=robot_size,
@@ -184,14 +208,54 @@ def main() -> None:
     )
     output_dir = Path(args.output)
 
-    print(f"Dataset : {root_dir}  split={args.split}  ({len(dataset)} sequence(s))")
-    print(f"Robot   : shape={robot_shape}  size={robot_size} m")
-    print(f"ICP           : {icp_required}")
+    print(f"Robot         : shape={robot_shape}  size={robot_size} m")
     print(f"Forward accum : {forward_accum}")
-    print(f"Output  : {output_dir}\n")
+    print(f"Output        : {output_dir}\n")
 
-    for seq in dataset:
-        process_sequence(seq, labeler, icp_required, output_dir, accum_window)
+    if args.seq is not None:
+        # Single-sequence mode: works with any KITTI-format dataset
+        seq_path = Path(args.seq)
+        cloud_subdir = args.cloud_subdir
+        if cloud_subdir is None:
+            cloud_subdir = (
+                RELLIS_CLOUD_SUBDIR
+                if (seq_path / RELLIS_CLOUD_SUBDIR).exists()
+                else "velodyne"
+            )
+        seq = KittiSequence(
+            cloud_dir=str(seq_path / cloud_subdir),
+            poses_file=str(seq_path / "poses.txt"),
+            max_rad=max_rad,
+            robot=robot,
+        )
+        process_sequence(seq, labeler, output_dir, accum_window)
+
+    elif args.dataset == "tartandrive":
+        root_dir           = _get(cfg, "data", "source",             default="data/tartandrive_data/")
+        lidar_subdir       = _get(cfg, "data", "lidar_subdir",       default="livox")
+        odom_subdir        = _get(cfg, "data", "odom_subdir",        default="super_odom")
+        lidar_poses_subdir = _get(cfg, "data", "lidar_poses_subdir", default="lidar_poses")
+        tf_file            = _get(cfg, "data", "static_tf_file",     default=None)
+        tf_key             = _get(cfg, "data", "lidar_tf_key",       default=None)
+        T_vehicle_lidar = (
+            load_vehicle_lidar_tf(tf_file, tf_key)
+            if tf_file and tf_key else None
+        )
+        dataset = TartanDrive(root_dir=root_dir, lidar_subdir=lidar_subdir,
+                              odom_subdir=odom_subdir, lidar_poses_subdir=lidar_poses_subdir,
+                              max_rad=max_rad, robot=robot, T_vehicle_lidar=T_vehicle_lidar)
+        print(f"Dataset : TartanDrive  root={root_dir}  lidar={lidar_subdir}  odom={odom_subdir}  ({len(dataset)} sequence(s))")
+        for seq in dataset:
+            process_sequence(seq, labeler, output_dir, accum_window)
+
+    else:
+        # RELLIS-3D split mode
+        root_dir = _get(cfg, "data", "source", default="data/rellis/")
+        split    = args.split or "all"
+        dataset  = Rellis3D(root_dir=root_dir, split=split, max_rad=max_rad, robot=robot)
+        print(f"Dataset : RELLIS-3D  root={root_dir}  split={split}  ({len(dataset)} sequence(s))")
+        for seq in dataset:
+            process_sequence(seq, labeler, output_dir, accum_window)
 
     print("\nDone.")
 

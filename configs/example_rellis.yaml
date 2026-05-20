@@ -3,7 +3,7 @@ robot:
   size: 1.5                # footprint size in metres (side length or diameter)
   height_min: -2.0         # ground points lower than this are ignored
   height_max:  0.3         # ground points higher than this are ignored
-  trajectory_window: 100   # number of scans before/after to include as trajectory
+  trajectory_window: 200   # number of scans before/after to include as trajectory
   accum_window: 20         # past scans to accumulate when labeling (fills blind spot under vehicle)
 
 data:
@@ -11,5 +11,4 @@ data:
   max_rad: 50.0            # ignore points farther than this (metres)
 
 setting:
-  icp_required: False      # True -> compute poses via ICP when poses.txt is absent
   forward_accum: True      # True -> only include forward-seen points from past scans in the accumulation
