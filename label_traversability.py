@@ -23,10 +23,12 @@ from __future__ import annotations
 
 import argparse
 import sys
+from collections import deque
 from pathlib import Path
 
 import numpy as np
 import yaml
+from tqdm import tqdm
 
 # Allow running from repo root without installing the package.
 sys.path.insert(0, str(Path(__file__).parent))
@@ -57,6 +59,76 @@ def _get(cfg: dict, *keys, default=None):
 
 
 # ---------------------------------------------------------------------------
+# Occupancy-grid helpers (used by method="grid")
+# ---------------------------------------------------------------------------
+
+def _build_grid(poses, resolution: float, half_size: float):
+    """Allocate a 2D int16 grid covering the trajectory + one footprint margin."""
+    all_x = np.array([p[0, 3] for p in poses])
+    all_y = np.array([p[1, 3] for p in poses])
+    margin = half_size + resolution
+    ox = float(all_x.min() - margin)
+    oy = float(all_y.min() - margin)
+    nx = int(np.ceil((all_x.max() - all_x.min() + 2 * margin) / resolution)) + 2
+    ny = int(np.ceil((all_y.max() - all_y.min() + 2 * margin) / resolution)) + 2
+    return np.zeros((nx, ny), dtype=np.int16), ox, oy
+
+
+def _rasterize(grid, tx: float, ty: float, R_2d, half_size: float,
+               resolution: float, ox: float, oy: float, delta: int, is_round: bool):
+    """Add delta (+1 or -1) to grid cells covered by the robot footprint at (tx, ty)."""
+    r_cells = int(np.ceil(half_size / resolution))
+    cx = int((tx - ox) / resolution)
+    cy = int((ty - oy) / resolution)
+
+    dg = np.arange(-r_cells, r_cells + 1)
+    DGX, DGY = np.meshgrid(dg, dg, indexing='ij')          # (2r+1, 2r+1)
+
+    WX = ox + (cx + DGX + 0.5) * resolution
+    WY = oy + (cy + DGY + 0.5) * resolution
+    DX = WX - tx
+    DY = WY - ty
+
+    if is_round:
+        mask = DX ** 2 + DY ** 2 <= half_size ** 2
+    else:
+        # Rotate displacement into robot body frame to test axis-aligned footprint
+        RX = DX * R_2d[0, 0] + DY * R_2d[1, 0]
+        RY = DX * R_2d[0, 1] + DY * R_2d[1, 1]
+        mask = (np.abs(RX) <= half_size) & (np.abs(RY) <= half_size)
+
+    GX = (cx + DGX)[mask]
+    GY = (cy + DGY)[mask]
+    valid = (GX >= 0) & (GX < grid.shape[0]) & (GY >= 0) & (GY < grid.shape[1])
+    grid[GX[valid], GY[valid]] += delta
+
+
+def _update_footprint(grid, pose, labeler: TraversabilityLabeler,
+                      resolution: float, ox: float, oy: float, delta: int):
+    tx, ty = float(pose[0, 3]), float(pose[1, 3])
+    _rasterize(grid, tx, ty, pose[:2, :2], labeler.half_size,
+               resolution, ox, oy, delta, labeler.robot_shape == "round")
+
+
+def _query_grid(grid, xyz: np.ndarray, pose, labeler: TraversabilityLabeler,
+                resolution: float, ox: float, oy: float) -> np.ndarray:
+    """Return uint8 label array for xyz (in scan-local frame)."""
+    labels = np.zeros(len(xyz), dtype=np.uint8)
+    height_mask = (xyz[:, 2] >= labeler.height_min) & (xyz[:, 2] <= labeler.height_max)
+    if not height_mask.any():
+        return labels
+    R, t = pose[:3, :3], pose[:3, 3]
+    xyz_world = (R @ xyz[height_mask].T).T + t
+    gx = ((xyz_world[:, 0] - ox) / resolution).astype(np.int32)
+    gy = ((xyz_world[:, 1] - oy) / resolution).astype(np.int32)
+    valid = (gx >= 0) & (gx < grid.shape[0]) & (gy >= 0) & (gy < grid.shape[1])
+    trav = np.zeros(height_mask.sum(), dtype=bool)
+    trav[valid] = grid[gx[valid], gy[valid]] > 0
+    labels[height_mask] = trav.astype(np.uint8)
+    return labels
+
+
+# ---------------------------------------------------------------------------
 # Per-sequence processing
 # ---------------------------------------------------------------------------
 
@@ -65,23 +137,21 @@ def process_sequence(
     labeler: TraversabilityLabeler,
     output_dir: Path,
     accum_window: int = 20,
+    method: str = "accumulated",
+    grid_resolution: float = 0.1,
 ) -> None:
+    if method not in ("accumulated", "by_range", "grid"):
+        raise ValueError(f"Unknown labeling method '{method}'. Use 'accumulated', 'by_range', or 'grid'.")
+
     n = len(seq)
     n_target = len(seq.target_indices) if seq.target_indices is not None else n
-    print(f"  Sequence {seq.name}: {n} scans total, {n_target} to label", flush=True)
+    print(f"  Sequence {seq.name}: {n} scans total, {n_target} to label  [method={method}]", flush=True)
 
     if not seq.has_poses():
         raise RuntimeError(
             f"Sequence {seq.name} has no poses — cannot label without odometry."
         )
     poses = seq.poses
-
-    # Load all scans up-front — non-target frames are still needed as
-    # accumulation context for nearby target frames.
-    scans_xyz = []
-    for i in range(n):
-        xyz, _ = seq.get_scan(i)
-        scans_xyz.append(xyz)
 
     if len(poses) != n:
         raise ValueError(
@@ -91,56 +161,100 @@ def process_sequence(
     seq_out = output_dir / seq.name
     seq_out.mkdir(parents=True, exist_ok=True)
 
-    # How many past scans to accumulate before labeling.
-    # The LiDAR has a blind spot directly under the vehicle at time t.
-    # Past scans saw that ground before the robot reached it, so accumulating
-    # them fills the gap and produces correct traversability labels.
     MAX_PTS_PER_PAST_SCAN = 20_000
-
     trav_count = 0
     total_pts  = 0
 
-    for i, cloud_file in enumerate(seq.cloud_files):
-        if seq.target_indices is not None and i not in seq.target_indices:
-            continue  # not in split — skip computation and output
+    pbar = tqdm(total=n_target, desc="  Labeling      ", unit="scan")
 
-        T_scan_world = np.linalg.inv(poses[i])
-        all_xyz      = [scans_xyz[i]]
-        all_origins  = [np.full(len(scans_xyz[i]), i, dtype=np.int32)]
-
-        for k in range(max(0, i - accum_window), i):
-            xyz_k = scans_xyz[k]
-
-            # Forward filter: drop points behind the robot at scan k.
-            if labeler.forward_accum:
-                fmask = labeler.forward_mask(xyz_k, poses, k)
-                xyz_k = xyz_k[fmask]
-            if len(xyz_k) == 0:
+    if method == "by_range":
+        # Only the current scan is needed — no context window.
+        for i, cloud_file in enumerate(seq.cloud_files):
+            if seq.target_indices is not None and i not in seq.target_indices:
                 continue
+            pbar.update(1)
+            xyz, _ = seq.get_scan(i)
+            labels_i = labeler.label_scan_by_range(xyz, poses, i)
+            out_path = seq_out / (Path(cloud_file).stem + ".trav")
+            labels_i.tofile(str(out_path))
+            trav_count += int(labels_i.sum())
+            total_pts  += len(labels_i)
 
-            step  = max(1, len(xyz_k) // MAX_PTS_PER_PAST_SCAN)
-            xyz_k = xyz_k[::step]
-            T_scan_k = T_scan_world @ poses[k]
-            R, t = T_scan_k[:3, :3], T_scan_k[:3, 3]
-            all_xyz.append(((R @ xyz_k.T).T + t).astype(np.float32))
-            all_origins.append(np.full(len(xyz_k), k, dtype=np.int32))
+    elif method == "accumulated":
+        # Sliding window: keep at most accum_window+1 scans in memory.
+        # Non-target scans are still loaded as accumulation context.
+        scan_window: dict = {}
+        for i, cloud_file in enumerate(seq.cloud_files):
+            xyz_i, _ = seq.get_scan(i)
+            scan_window[i] = xyz_i
+            for k in [k for k in list(scan_window) if k < i - accum_window]:
+                del scan_window[k]
 
-        xyz_acc      = np.vstack(all_xyz)
-        scan_origins = np.concatenate(all_origins)
+            if seq.target_indices is not None and i not in seq.target_indices:
+                continue
+            pbar.update(1)
 
-        # label_accumulated only uses poses AFTER each point's origin scan,
-        # preventing dynamic objects at former robot positions being mislabeled.
-        labels_acc = labeler.label_accumulated(xyz_acc, scan_origins, poses, i)
-        labels_i   = labels_acc[:len(scans_xyz[i])]
+            T_scan_world = np.linalg.inv(poses[i])
+            all_xyz      = [xyz_i]
+            all_origins  = [np.full(len(xyz_i), i, dtype=np.int32)]
 
-        out_path = seq_out / (Path(cloud_file).stem + ".trav")
-        labels_i.tofile(str(out_path))
+            for k in range(max(0, i - accum_window), i):
+                xyz_k = scan_window.get(k)
+                if xyz_k is None:
+                    continue
+                if labeler.forward_accum:
+                    fmask = labeler.forward_mask(xyz_k, poses, k)
+                    xyz_k = xyz_k[fmask]
+                if len(xyz_k) == 0:
+                    continue
+                step     = max(1, len(xyz_k) // MAX_PTS_PER_PAST_SCAN)
+                xyz_k    = xyz_k[::step]
+                T_scan_k = T_scan_world @ poses[k]
+                R, t     = T_scan_k[:3, :3], T_scan_k[:3, 3]
+                all_xyz.append(((R @ xyz_k.T).T + t).astype(np.float32))
+                all_origins.append(np.full(len(xyz_k), k, dtype=np.int32))
 
-        trav_count += int(labels_i.sum())
-        total_pts  += len(labels_i)
+            xyz_acc      = np.vstack(all_xyz)
+            scan_origins = np.concatenate(all_origins)
+            labels_acc   = labeler.label_accumulated(xyz_acc, scan_origins, poses, i)
+            labels_i     = labels_acc[:len(xyz_i)]
 
+            out_path = seq_out / (Path(cloud_file).stem + ".trav")
+            labels_i.tofile(str(out_path))
+            trav_count += int(labels_i.sum())
+            total_pts  += len(labels_i)
+
+    else:
+        # Reverse pass with 2D occupancy grid.
+        # Complexity: O(N×M) vs O(N×W×M) for the other methods.
+        grid, ox, oy = _build_grid(poses, grid_resolution, labeler.half_size)
+        mb = grid.nbytes / 1024 / 1024
+        print(f"    Grid: {grid.shape[0]}×{grid.shape[1]} cells "
+              f"@ {grid_resolution}m resolution  ({mb:.1f} MB)", flush=True)
+
+        for i in range(n - 1, -1, -1):
+            # Sliding-window update: add pose i+1, remove pose i+trajectory_window+1
+            j_add = i + 1
+            if j_add < n:
+                _update_footprint(grid, poses[j_add], labeler, grid_resolution, ox, oy, +1)
+            j_remove = i + labeler.trajectory_window + 1
+            if j_remove < n:
+                _update_footprint(grid, poses[j_remove], labeler, grid_resolution, ox, oy, -1)
+
+            if seq.target_indices is not None and i not in seq.target_indices:
+                continue
+            pbar.update(1)
+
+            xyz, _ = seq.get_scan(i)
+            labels_i = _query_grid(grid, xyz, poses[i], labeler, grid_resolution, ox, oy)
+            out_path = seq_out / (Path(seq.cloud_files[i]).stem + ".trav")
+            labels_i.tofile(str(out_path))
+            trav_count += int(labels_i.sum())
+            total_pts  += len(labels_i)
+
+    pbar.close()
     pct = 100.0 * trav_count / max(total_pts, 1)
-    print(f"    Saved {n} label files -> {seq_out}")
+    print(f"    Saved {n_target} label files -> {seq_out}")
     print(f"    Traversable: {trav_count}/{total_pts} pts ({pct:.1f} %)")
 
 
@@ -185,8 +299,11 @@ def main() -> None:
 
     cfg = load_config(args.config)
 
-    max_rad       = _get(cfg, "data",    "max_rad",            default=50.0)
-    forward_accum = _get(cfg, "setting", "forward_accum",      default=False)
+    max_rad          = _get(cfg, "data",    "max_rad",            default=50.0)
+    forward_accum    = _get(cfg, "setting", "forward_accum",      default=False)
+    method           = _get(cfg, "setting", "method",             default="accumulated")
+    lidar_range      = _get(cfg, "setting", "lidar_range",        default=None)
+    grid_resolution  = _get(cfg, "setting", "grid_resolution",    default=0.1)
     robot_shape   = _get(cfg, "robot",   "shape",              default="square")
     robot_size    = _get(cfg, "robot",   "size",               default=1.0)
     height_min    = _get(cfg, "robot",   "height_min",         default=-0.5)
@@ -205,11 +322,15 @@ def main() -> None:
         height_max=height_max,
         trajectory_window=traj_window,
         forward_accum=forward_accum,
+        lidar_range=lidar_range,
     )
     output_dir = Path(args.output)
 
     print(f"Robot         : shape={robot_shape}  size={robot_size} m")
     print(f"Forward accum : {forward_accum}")
+    extra = (f"  lidar_range={lidar_range} m" if method == "by_range"
+             else f"  grid_resolution={grid_resolution} m" if method == "grid" else "")
+    print(f"Method        : {method}{extra}")
     print(f"Output        : {output_dir}\n")
 
     if args.seq is not None:
@@ -228,7 +349,7 @@ def main() -> None:
             max_rad=max_rad,
             robot=robot,
         )
-        process_sequence(seq, labeler, output_dir, accum_window)
+        process_sequence(seq, labeler, output_dir, accum_window, method, grid_resolution)
 
     elif args.dataset == "tartandrive":
         root_dir           = _get(cfg, "data", "source",             default="data/tartandrive_data/")
@@ -246,7 +367,7 @@ def main() -> None:
                               max_rad=max_rad, robot=robot, T_vehicle_lidar=T_vehicle_lidar)
         print(f"Dataset : TartanDrive  root={root_dir}  lidar={lidar_subdir}  odom={odom_subdir}  ({len(dataset)} sequence(s))")
         for seq in dataset:
-            process_sequence(seq, labeler, output_dir, accum_window)
+            process_sequence(seq, labeler, output_dir, accum_window, method, grid_resolution)
 
     else:
         # RELLIS-3D split mode
@@ -255,7 +376,7 @@ def main() -> None:
         dataset  = Rellis3D(root_dir=root_dir, split=split, max_rad=max_rad, robot=robot)
         print(f"Dataset : RELLIS-3D  root={root_dir}  split={split}  ({len(dataset)} sequence(s))")
         for seq in dataset:
-            process_sequence(seq, labeler, output_dir, accum_window)
+            process_sequence(seq, labeler, output_dir, accum_window, method, grid_resolution)
 
     print("\nDone.")
 

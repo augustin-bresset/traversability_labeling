@@ -1,6 +1,6 @@
 robot:
   shape: "square"          # "square" or "round"
-  size: 1.5                # footprint size in metres (side length or diameter)
+  size: 1.                # footprint size in metres (side length or diameter)
   height_min: -2.0         # ground points lower than this are ignored
   height_max:  0.3         # ground points higher than this are ignored
   trajectory_window: 200   # number of scans before/after to include as trajectory
@@ -12,3 +12,8 @@ data:
 
 setting:
   forward_accum: True      # True -> only include forward-seen points from past scans in the accumulation
+  method: "grid"           # "accumulated": accumulated cloud, pose-count window (trajectory_window)
+                           # "by_range"   : single scan, window bounded by LiDAR range (lidar_range)
+                           # "grid"       : reverse pass + 2D occupancy grid, O(N×M) — fastest for batch
+  lidar_range: 30.0        # max LiDAR range in metres (only used when method = "by_range")
+  grid_resolution: 0.1     # grid cell size in metres (only used when method = "grid")

@@ -18,10 +18,13 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import faulthandler
 import sys
 from pathlib import Path
 
 import yaml
+
+faulthandler.enable()
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
