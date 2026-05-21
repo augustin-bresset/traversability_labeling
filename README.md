@@ -63,7 +63,67 @@ data/tartandrive_data/
         └── current_position/
 ```
 
-### 3. Label traversability
+### 3. Preprocessing — compute poses (if not already available)
+
+Poses are required for labeling. If your sequence does not already have them, two preprocessing scripts are available.
+
+#### Option A — KISS-ICP odometry (TartanDrive / any `.npy` sequence)
+
+Builds a full trajectory with [KISS-ICP](https://github.com/PRBonn/kiss-icp). Much faster than Open3D GICP (~100×).
+
+```bash
+python -m src.preprocessing.gicp_odometry <seq_dir> \
+    --lidar-subdir velodyne_1 \
+    --out-subdir   gicp_poses \
+    --voxel-size   1.0 \
+    --max-range    50.0
+```
+
+Optional GPS z-correction (replaces KISS-ICP z, which drifts on flat terrain):
+
+```bash
+python -m src.preprocessing.gicp_odometry <seq_dir> \
+    --lidar-subdir    velodyne_1 \
+    --gps-odom-subdir gps_odom \
+    --out-subdir      gicp_poses
+```
+
+Output written to `<seq_dir>/gicp_poses/`:
+```
+poses.npy        (N, 4, 4) float64 — T_world_lidar per frame
+valid_mask.npy   (N,)      bool
+timestamps.txt   (N,)
+```
+
+Then set `data.lidar_poses_subdir: "gicp_poses"` in the config.
+
+#### Option B — IMU/odometry pose sync (TartanDrive)
+
+Interpolates existing odometry poses to LiDAR timestamps using gyroscope integration for rotation and linear interpolation for position.  Useful when a GPS/wheel-odom source already provides a trajectory but is not synchronized with the LiDAR.
+
+```bash
+python -m src.preprocessing.imu_pose_sync <seq_dir> \
+    --lidar-subdir velodyne_1 \
+    --odom-subdir  gps_odom \
+    --out-subdir   lidar_poses
+```
+
+Output written to `<seq_dir>/lidar_poses/`:
+```
+poses.npy        (N, 4, 4) float64 — NaN rows for invalid frames
+valid_mask.npy   (N,)      bool    — False for out-of-range frames
+timestamps.txt   (N,)
+```
+
+Then set `data.lidar_poses_subdir: "lidar_poses"` in the config.
+
+---
+
+**RELLIS-3D** — poses come directly from the `poses.txt` file included in the dataset (KITTI format, 12 values per line). No preprocessing needed.
+
+---
+
+### 4. Label traversability (batch)
 
 ```bash
 # RELLIS-3D
@@ -77,7 +137,7 @@ For each scan a binary `.trav` file (uint8, same point order as the input cloud)
 
 Poses are required — provide a `poses.txt` (RELLIS) or equivalent odometry file. Without poses the pipeline will raise an error.
 
-### 4. Visualise
+### 5. Visualise
 
 ```bash
 # RELLIS-3D:
@@ -89,6 +149,9 @@ python -m src.visualization --seq data/tartandrive_data/ --config configs/exampl
 # From pre-computed .trav files:
 python -m src.visualization --seq data/rellis/Rellis-3D/00000 \
     --labels output/labels/00000 --config configs/example_rellis.yaml
+
+python -m src.visualization --seq data/tartandrive_data/ \
+--labels output/output/labels/ --config configs/example_tartan.yaml
 
 # Start at a specific scan:
 python -m src.visualization --seq data/rellis/Rellis-3D/00000 --idx 50

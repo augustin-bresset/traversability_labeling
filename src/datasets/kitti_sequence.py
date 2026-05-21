@@ -82,5 +82,9 @@ class KittiSequence:
         return self.poses is not None and len(self.poses) == len(self)
 
     @property
+    def seq_dir(self) -> Path:
+        return self.cloud_dir.parent
+
+    @property
     def name(self) -> str:
         return self.cloud_dir.parent.name

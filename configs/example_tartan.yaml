@@ -14,7 +14,8 @@ data:
   max_rad: 50.0                        # ignore points farther than this (metres)
 
 setting:
-  output_dir: "output/labels"   # default output directory (overridable with --output)
+  output_dir: "output/labels"   # used when output_subdir is null and --output is not set
+  output_subdir: "trav_labels"  # when set, labels are stored inside each sequence dir: <seq_dir>/trav_labels/
   method: "grid"                # batch labeling method (see sub-sections below)
   viewer_method: "accumulated"  # viewer method — "accumulated" or "by_range" only (not "grid")
 

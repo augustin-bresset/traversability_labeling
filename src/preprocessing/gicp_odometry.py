@@ -125,14 +125,28 @@ def build_kiss_trajectory(
 
 def _parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        description="Build a LiDAR odometry trajectory using KISS-ICP."
+        description="Build a LiDAR odometry trajectory using KISS-ICP.",
+        epilog=(
+            "Single sequence:\n"
+            "  python -m src.preprocessing.gicp_odometry <seq_dir> --lidar-subdir velodyne_1\n\n"
+            "All sequences under a root directory:\n"
+            "  python -m src.preprocessing.gicp_odometry --root-dir data/tartandrive_data/ "
+            "--lidar-subdir velodyne_1\n"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    p.add_argument("seq_dir")
+    # Target: either a single seq_dir or --root-dir for batch mode
+    target = p.add_mutually_exclusive_group(required=True)
+    target.add_argument("seq_dir", nargs="?", default=None,
+                        help="Single sequence directory.")
+    target.add_argument("--root-dir", default=None,
+                        help="Dataset root: process every sequence found under this directory.")
+
     p.add_argument("--lidar-subdir",       default="velodyne_1")
     p.add_argument("--odom-subdir",        default=None,
                    help="Odom sub-dir (optional, not used by KISS-ICP itself).")
     p.add_argument("--lidar-poses-subdir", default=None,
-                   help="Precomputed poses (not used by KISS-ICP).")
+                   help="Precomputed poses sub-dir (not used by KISS-ICP).")
     p.add_argument("--out-subdir",         default="gicp_poses")
     p.add_argument("--tf-file",            default=None)
     p.add_argument("--tf-key",             default=None)
@@ -146,25 +160,46 @@ def _parser() -> argparse.ArgumentParser:
                    help="Sub-directory with GPS odometry (e.g. 'gps_odom'). "
                         "When provided, the z-component of each pose is replaced "
                         "with interpolated GPS altitude to remove KISS-ICP z-drift.")
+    p.add_argument("--force", action="store_true",
+                   help="Re-run even if <out-subdir>/poses.npy already exists.")
     return p
 
 
-def main(args: argparse.Namespace) -> None:
-    seq_dir = Path(args.seq_dir)
+def _discover_seq_dirs(root: Path, lidar_subdir: str):
+    """Yield all sequence dirs under root that contain <lidar_subdir>/*.npy files."""
+    seen: set = set()
+    for lidar_dir in sorted(root.rglob(lidar_subdir)):
+        if not lidar_dir.is_dir():
+            continue
+        if not any(lidar_dir.glob("*.npy")):
+            continue
+        seq_dir = lidar_dir.parent
+        if seq_dir not in seen:
+            seen.add(seq_dir)
+            yield seq_dir
 
-    T_vehicle_lidar = None
-    if args.tf_file and args.tf_key:
-        T_vehicle_lidar = load_vehicle_lidar_tf(args.tf_file, args.tf_key)
 
-    seq = TartanDriveSequence(
-        str(seq_dir),
-        lidar_subdir=args.lidar_subdir,
-        odom_subdir=args.odom_subdir or None,
-        lidar_poses_subdir=args.lidar_poses_subdir or None,
-        T_vehicle_lidar=T_vehicle_lidar,
-    )
-    print(f"Sequence : {seq.name}  ({len(seq)} scans)")
-    print(f"Building KISS-ICP trajectory …\n")
+def _process_one_seq(seq_dir: Path, args: argparse.Namespace,
+                     T_vehicle_lidar) -> bool:
+    """Run KISS-ICP on one sequence. Returns True if processed, False if skipped."""
+    out_dir = seq_dir / args.out_subdir
+    if not args.force and (out_dir / "poses.npy").exists():
+        print(f"  [SKIP] {seq_dir.name} — {args.out_subdir}/poses.npy already exists  (use --force to redo)")
+        return False
+
+    try:
+        seq = TartanDriveSequence(
+            str(seq_dir),
+            lidar_subdir=args.lidar_subdir,
+            odom_subdir=None,
+            lidar_poses_subdir=None,
+        )
+    except FileNotFoundError as e:
+        print(f"  [SKIP] {seq_dir.name} — {e}")
+        return False
+
+    print(f"\n--- {seq_dir.name}  ({len(seq)} scans) ---")
+    print("Building KISS-ICP trajectory …")
 
     t0 = time.time()
     poses, valid = build_kiss_trajectory(
@@ -175,7 +210,7 @@ def main(args: argparse.Namespace) -> None:
         deskew=args.deskew,
     )
     elapsed = time.time() - t0
-    print(f"\nKISS-ICP done. {len(seq)} frames in {elapsed:.1f}s  ({len(seq)/elapsed:.0f} scans/s).")
+    print(f"KISS-ICP done. {len(seq)} frames in {elapsed:.1f}s  ({len(seq)/elapsed:.0f} scans/s).")
 
     lidar_ts_path = seq_dir / args.lidar_subdir / "timestamps.txt"
     lidar_ts = np.loadtxt(lidar_ts_path)
@@ -194,14 +229,36 @@ def main(args: argparse.Namespace) -> None:
             print(f"  z range after : [{z_after.min():.2f}, {z_after.max():.2f}] m  "
                   f"(drift {z_after[-1] - z_after[0]:+.2f} m)")
 
-    out_dir = seq_dir / args.out_subdir
     out_dir.mkdir(exist_ok=True)
-
     np.save(out_dir / "poses.npy",      poses)
     np.save(out_dir / "valid_mask.npy", valid)
     np.savetxt(out_dir / "timestamps.txt", lidar_ts, fmt="%.18e")
-
     print(f"Output : {out_dir}")
+    return True
+
+
+def main(args: argparse.Namespace) -> None:
+    T_vehicle_lidar = None
+    if args.tf_file and args.tf_key:
+        T_vehicle_lidar = load_vehicle_lidar_tf(args.tf_file, args.tf_key)
+
+    if args.root_dir:
+        root = Path(args.root_dir)
+        seq_dirs = list(_discover_seq_dirs(root, args.lidar_subdir))
+        if not seq_dirs:
+            print(f"No sequences found under {root} with lidar_subdir='{args.lidar_subdir}'.")
+            return
+        print(f"Found {len(seq_dirs)} sequence(s) under {root}")
+        done, skipped = 0, 0
+        for seq_dir in seq_dirs:
+            processed = _process_one_seq(seq_dir, args, T_vehicle_lidar)
+            if processed:
+                done += 1
+            else:
+                skipped += 1
+        print(f"\nDone. Processed: {done}  Skipped: {skipped}  Total: {len(seq_dirs)}")
+    else:
+        _process_one_seq(Path(args.seq_dir), args, T_vehicle_lidar)
 
 
 if __name__ == "__main__":

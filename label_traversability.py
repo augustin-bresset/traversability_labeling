@@ -140,6 +140,10 @@ def process_sequence(
     method: str = "accumulated",
     grid_resolution: float = 0.1,
 ) -> None:
+    """
+    Label one sequence and write .trav files to output_dir (the final destination,
+    no seq.name is appended — callers are responsible for that).
+    """
     if method not in ("accumulated", "by_range", "grid"):
         raise ValueError(f"Unknown labeling method '{method}'. Use 'accumulated', 'by_range', or 'grid'.")
 
@@ -158,7 +162,7 @@ def process_sequence(
             f"Pose count ({len(poses)}) != scan count ({n}) for sequence {seq.name}."
         )
 
-    seq_out = output_dir / seq.name
+    seq_out = output_dir
     seq_out.mkdir(parents=True, exist_ok=True)
 
     MAX_PTS_PER_PAST_SCAN = 20_000
@@ -330,9 +334,22 @@ def main() -> None:
         forward_accum=forward_accum,
         lidar_range=lidar_range,
     )
-    output_dir = Path(args.output) if args.output is not None else Path(
-        _get(cfg, "setting", "output_dir", default="output/labels")
-    )
+
+    # Output resolution: --output > config output_dir (flat) / config output_subdir (in-seq)
+    output_cli     = args.output
+    output_subdir  = _get(cfg, "setting", "output_subdir", default=None)
+    output_dir_cfg = Path(_get(cfg, "setting", "output_dir", default="output/labels"))
+
+    def _seq_out(seq) -> Path:
+        """Compute per-sequence output directory."""
+        if output_cli is not None:
+            # Explicit --output: flat layout <output>/<seq_name>/
+            return Path(output_cli) / seq.name
+        if output_subdir is not None:
+            # In-sequence layout: <seq_dir>/<output_subdir>/
+            return seq.seq_dir / output_subdir
+        # Default: <output_dir>/<seq_name>/
+        return output_dir_cfg / seq.name
 
     print(f"Robot         : shape={robot_shape}  size={robot_size} m")
     print(f"Forward accum : {forward_accum}")
@@ -343,7 +360,13 @@ def main() -> None:
     else:
         extra = f"  trajectory_window={traj_window}  accum_window={accum_window}"
     print(f"Method        : {method}{extra}")
-    print(f"Output        : {output_dir}\n")
+    if output_cli is not None:
+        print(f"Output        : {output_cli}/<seq_name>/")
+    elif output_subdir is not None:
+        print(f"Output        : <seq_dir>/{output_subdir}/  (in-sequence)")
+    else:
+        print(f"Output        : {output_dir_cfg}/<seq_name>/")
+    print()
 
     if args.seq is not None:
         # Single-sequence mode: works with any KITTI-format dataset
@@ -361,7 +384,7 @@ def main() -> None:
             max_rad=max_rad,
             robot=robot,
         )
-        process_sequence(seq, labeler, output_dir, accum_window, method, grid_resolution)
+        process_sequence(seq, labeler, _seq_out(seq), accum_window, method, grid_resolution)
 
     elif args.dataset == "tartandrive":
         root_dir           = _get(cfg, "data", "source",             default="data/tartandrive_data/")
@@ -379,7 +402,7 @@ def main() -> None:
                               max_rad=max_rad, robot=robot, T_vehicle_lidar=T_vehicle_lidar)
         print(f"Dataset : TartanDrive  root={root_dir}  lidar={lidar_subdir}  odom={odom_subdir}  ({len(dataset)} sequence(s))")
         for seq in dataset:
-            process_sequence(seq, labeler, output_dir, accum_window, method, grid_resolution)
+            process_sequence(seq, labeler, _seq_out(seq), accum_window, method, grid_resolution)
 
     else:
         # RELLIS-3D split mode
@@ -388,7 +411,7 @@ def main() -> None:
         dataset  = Rellis3D(root_dir=root_dir, split=split, max_rad=max_rad, robot=robot)
         print(f"Dataset : RELLIS-3D  root={root_dir}  split={split}  ({len(dataset)} sequence(s))")
         for seq in dataset:
-            process_sequence(seq, labeler, output_dir, accum_window, method, grid_resolution)
+            process_sequence(seq, labeler, _seq_out(seq), accum_window, method, grid_resolution)
 
     print("\nDone.")
 
