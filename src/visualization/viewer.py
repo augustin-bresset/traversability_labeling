@@ -85,7 +85,11 @@ class TraversabilityViewer:
         robot_shape: str = "square",
         robot_size: float = 1.0,
         start_idx: int = 0,
+        viewer_method: str = "accumulated",
     ):
+        if viewer_method not in ("accumulated", "by_range"):
+            raise ValueError(f"viewer_method '{viewer_method}' is not supported in the viewer. "
+                             "Use 'accumulated' or 'by_range'.")
         self.seq = seq
         self.poses = poses
         self.labeler = labeler
@@ -93,6 +97,7 @@ class TraversabilityViewer:
         self.robot_shape = robot_shape
         self.robot_size = robot_size
         self.current_idx = start_idx
+        self.viewer_method = viewer_method
 
         self._label_cache: dict[int, np.ndarray] = {}
         self._scan_cache:  dict[int, Tuple[np.ndarray, np.ndarray]] = {}
@@ -160,11 +165,12 @@ class TraversabilityViewer:
         robot_shape: str = "square",
         robot_size: float = 1.0,
         start_idx: int = 0,
+        viewer_method: str = "accumulated",
     ) -> None:
         app = gui.Application.instance
         app.initialize()
         v = TraversabilityViewer(
-            seq, poses, labeler, label_dir, robot_shape, robot_size, start_idx
+            seq, poses, labeler, label_dir, robot_shape, robot_size, start_idx, viewer_method
         )
         v._build_window()
         app.run()
@@ -557,7 +563,10 @@ class TraversabilityViewer:
 
         # Compute on-the-fly
         if self.poses is not None:
-            labels = self.labeler.label_scan(xyz, self.poses, idx)
+            if self.viewer_method == "by_range":
+                labels = self.labeler.label_scan_by_range(xyz, self.poses, idx)
+            else:
+                labels = self.labeler.label_scan(xyz, self.poses, idx)
         else:
             labels = np.zeros(len(xyz), dtype=np.uint8)
 

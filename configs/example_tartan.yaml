@@ -1,24 +1,37 @@
 robot:
   shape: "square"          # "square" or "round"
   size: 3.0                # footprint size in metres (side length or diameter)
-  height_min: -10.0         # ground points lower than this are ignored
+  height_min: -10.0        # ground points lower than this are ignored
   height_max:  1.5         # ground points higher than this are ignored
-  trajectory_window: 200   # number of scans before/after to include as trajectory
-  accum_window: 20         # past scans to accumulate when labeling (fills blind spot under vehicle)
 
 data:
   source: "data/tartandrive_data/"
-  lidar_subdir: "velodyne_0"         # "livox", "velodyne_0", or "velodyne_1"
-  odom_subdir:        "gps_odom"      # "super_odom" (local frame) or "gps_odom" (UTM/global)
-  lidar_poses_subdir: "gicp_poses"   # precomputed KISS-ICP poses + GPS z-correction (set to null to use odom only)
+  lidar_subdir: "velodyne_0"           # "livox", "velodyne_0", or "velodyne_1"
+  odom_subdir: "gps_odom"              # "super_odom" (local frame) or "gps_odom" (UTM/global)
+  lidar_poses_subdir: "gicp_poses"     # precomputed KISS-ICP poses + GPS z-correction (null = odom only)
   static_tf_file: "resources/tartan_static_transforms.npy"
   lidar_tf_key: "vehicle__to__velodyne_2"  # key in static_tf_file; omit or set null to skip
-  max_rad: 50.0                      # ignore points farther than this (metres)
+  max_rad: 50.0                        # ignore points farther than this (metres)
 
 setting:
-  forward_accum: True     # True -> only include forward-seen points from past scans in the accumulation
-  method: "grid"       # "accumulated": accumulated cloud, pose-count window (trajectory_window)
-                          # "by_range"   : single scan, window bounded by LiDAR range (lidar_range)
-                          # "grid"       : reverse pass + 2D occupancy grid, O(N×M) — fastest for batch
-  lidar_range: 100.0      # max LiDAR range in metres (only used when method = "by_range")
-  grid_resolution: 0.1    # grid cell size in metres (only used when method = "grid")
+  output_dir: "output/labels"   # default output directory (overridable with --output)
+  method: "grid"                # batch labeling method (see sub-sections below)
+  viewer_method: "accumulated"  # viewer method — "accumulated" or "by_range" only (not "grid")
+
+  # --- method: accumulated ---
+  # Accumulated cloud from past scans, trajectory window in number of poses.
+  accumulated:
+    trajectory_window: 200  # number of future poses to check for traversability
+    accum_window: 20        # past scans stacked to fill the LiDAR blind spot under the robot
+    forward_accum: True     # only keep forward-seen points from past scans in the accumulation
+
+  # --- method: by_range ---
+  # Single scan, trajectory window bounded by LiDAR physical range.
+  by_range:
+    lidar_range: 100.0      # max distance (m) from scan origin — stops when robot goes beyond
+
+  # --- method: grid ---
+  # Reverse pass + 2D occupancy grid. O(N×M) total — fastest for full-dataset batch.
+  grid:
+    trajectory_window: 200  # sliding window size (number of future poses kept in the grid)
+    resolution: 0.1         # grid cell size in metres (trade-off: precision vs memory)

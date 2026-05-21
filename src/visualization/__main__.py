@@ -104,13 +104,16 @@ Examples:
     with open(args.config) as f:
         cfg = yaml.safe_load(f)
 
-    max_rad       = _get(cfg, "data",    "max_rad",           default=50.0)
-    forward_accum = _get(cfg, "setting", "forward_accum",     default=False)
-    robot_shape   = _get(cfg, "robot",   "shape",             default="square")
-    robot_size    = _get(cfg, "robot",   "size",              default=1.0)
-    height_min    = _get(cfg, "robot",   "height_min",        default=-0.5)
-    height_max    = _get(cfg, "robot",   "height_max",        default=0.3)
-    traj_window   = _get(cfg, "robot",   "trajectory_window", default=100)
+    max_rad       = _get(cfg, "data",  "max_rad",    default=50.0)
+    robot_shape   = _get(cfg, "robot", "shape",      default="square")
+    robot_size    = _get(cfg, "robot", "size",       default=1.0)
+    height_min    = _get(cfg, "robot", "height_min", default=-0.5)
+    height_max    = _get(cfg, "robot", "height_max", default=0.3)
+
+    viewer_method = _get(cfg, "setting", "viewer_method", default="accumulated")
+    traj_window   = _get(cfg, "setting", "accumulated", "trajectory_window", default=100)
+    forward_accum = _get(cfg, "setting", "accumulated", "forward_accum",     default=False)
+    lidar_range   = _get(cfg, "setting", "by_range",   "lidar_range",       default=None)
     robot = Robot(shape=robot_shape, size=robot_size,
                   height_min=height_min, height_max=height_max)
     lidar_subdir_cfg       = _get(cfg, "data", "lidar_subdir",        default=None)
@@ -198,6 +201,7 @@ Examples:
         height_max=height_max,
         trajectory_window=traj_window,
         forward_accum=forward_accum,
+        lidar_range=lidar_range,
     )
 
     label_dir = Path(args.labels) if args.labels else None
@@ -211,6 +215,7 @@ Examples:
         robot_shape=robot_shape,
         robot_size=robot_size,
         start_idx=args.idx,
+        viewer_method=viewer_method,
     )
 
 

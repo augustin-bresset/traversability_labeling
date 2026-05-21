@@ -267,7 +267,7 @@ def main() -> None:
         description="Label traversability in LiDAR sequences."
     )
     parser.add_argument("--config",  default="configs/example_rellis.yaml", help="Config YAML")
-    parser.add_argument("--output",  default="output/labels",               help="Output directory")
+    parser.add_argument("--output",  default=None, help="Output directory (overrides config output_dir)")
     parser.add_argument(
         "--dataset", default=None, choices=["rellis", "tartandrive"],
         help="Dataset mode: 'rellis' or 'tartandrive' (reads root from config data.source)",
@@ -299,37 +299,49 @@ def main() -> None:
 
     cfg = load_config(args.config)
 
-    max_rad          = _get(cfg, "data",    "max_rad",            default=50.0)
-    forward_accum    = _get(cfg, "setting", "forward_accum",      default=False)
-    method           = _get(cfg, "setting", "method",             default="accumulated")
-    lidar_range      = _get(cfg, "setting", "lidar_range",        default=None)
-    grid_resolution  = _get(cfg, "setting", "grid_resolution",    default=0.1)
-    robot_shape   = _get(cfg, "robot",   "shape",              default="square")
-    robot_size    = _get(cfg, "robot",   "size",               default=1.0)
-    height_min    = _get(cfg, "robot",   "height_min",         default=-0.5)
-    height_max    = _get(cfg, "robot",   "height_max",         default=0.3)
-    traj_window   = _get(cfg, "robot",   "trajectory_window",  default=100)
-    accum_window  = _get(cfg, "robot",   "accum_window",       default=20)
+    max_rad     = _get(cfg, "data",  "max_rad",     default=50.0)
+    robot_shape = _get(cfg, "robot", "shape",       default="square")
+    robot_size  = _get(cfg, "robot", "size",        default=1.0)
+    height_min  = _get(cfg, "robot", "height_min",  default=-0.5)
+    height_max  = _get(cfg, "robot", "height_max",  default=0.3)
+
+    method      = _get(cfg, "setting", "method",       default="accumulated")
+
+    traj_window   = _get(cfg, "setting", "accumulated", "trajectory_window", default=100)
+    accum_window  = _get(cfg, "setting", "accumulated", "accum_window",      default=20)
+    forward_accum = _get(cfg, "setting", "accumulated", "forward_accum",     default=False)
+
+    lidar_range   = _get(cfg, "setting", "by_range", "lidar_range", default=None)
+
+    grid_traj_window = _get(cfg, "setting", "grid", "trajectory_window", default=traj_window)
+    grid_resolution  = _get(cfg, "setting", "grid", "resolution",        default=0.1)
 
     robot = Robot(
         shape=robot_shape, size=robot_size,
         height_min=height_min, height_max=height_max,
     )
+    active_traj_window = grid_traj_window if method == "grid" else traj_window
     labeler = TraversabilityLabeler(
         robot_shape=robot_shape,
         robot_size=robot_size,
         height_min=height_min,
         height_max=height_max,
-        trajectory_window=traj_window,
+        trajectory_window=active_traj_window,
         forward_accum=forward_accum,
         lidar_range=lidar_range,
     )
-    output_dir = Path(args.output)
+    output_dir = Path(args.output) if args.output is not None else Path(
+        _get(cfg, "setting", "output_dir", default="output/labels")
+    )
 
     print(f"Robot         : shape={robot_shape}  size={robot_size} m")
     print(f"Forward accum : {forward_accum}")
-    extra = (f"  lidar_range={lidar_range} m" if method == "by_range"
-             else f"  grid_resolution={grid_resolution} m" if method == "grid" else "")
+    if method == "by_range":
+        extra = f"  lidar_range={lidar_range} m"
+    elif method == "grid":
+        extra = f"  trajectory_window={grid_traj_window}  resolution={grid_resolution} m"
+    else:
+        extra = f"  trajectory_window={traj_window}  accum_window={accum_window}"
     print(f"Method        : {method}{extra}")
     print(f"Output        : {output_dir}\n")
 
